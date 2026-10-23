@@ -13,7 +13,7 @@
     -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent;
     font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   }
-  canvas { display: block; width: 100vw; height: 100vh; }
+  canvas { display: block; width: 100%; height: 100%; }
   .overlay {
     position: fixed; inset: 0; display: flex; flex-direction: column;
     align-items: center; justify-content: center; gap: 14px;
@@ -31,7 +31,7 @@
   .overlay button.alt { background: #ffffff; color: #1f4f33; box-shadow: 0 4px 0 #b9cfc2; }
   .overlay button:active { transform: translateY(3px); box-shadow: 0 1px 0 #c99b17; }
   #pauseBtn {
-    position: fixed; top: calc(8px + env(safe-area-inset-top)); left: 8px; width: 40px; height: 40px;
+    position: fixed; top: calc(8px + env(safe-area-inset-top)); left: calc(8px + env(safe-area-inset-left, 0px)); width: 40px; height: 40px;
     border: 0; border-radius: 10px; background: rgba(0,0,0,0.3); color: #fff; font-size: 18px;
   }
 </style>
@@ -73,15 +73,17 @@
 
   const canvas = document.getElementById('game');
   const ctx = canvas.getContext('2d');
-  let scale = 1, ox = 0, oy = 0, dpr = 1;
+  let scale = 1, ox = 0, oy = 0, dpr = 1, cw = 1, ch = 1;
 
   function resize() {
     dpr = window.devicePixelRatio || 1;
-    canvas.width = Math.round(innerWidth * dpr);
-    canvas.height = Math.round(innerHeight * dpr);
-    scale = Math.min(innerWidth / W, innerHeight / H);
-    ox = (innerWidth - W * scale) / 2;
-    oy = (innerHeight - H * scale) / 2;
+    cw = canvas.clientWidth || innerWidth;
+    ch = canvas.clientHeight || innerHeight;
+    canvas.width = Math.round(cw * dpr);
+    canvas.height = Math.round(ch * dpr);
+    scale = Math.min(cw / W, ch / H);
+    ox = (cw - W * scale) / 2;
+    oy = (ch - H * scale) / 2;
   }
   addEventListener('resize', resize);
   resize();
@@ -201,7 +203,8 @@
 
   // ---------- Управление ----------
   function toLogical(e) {
-    return { x: (e.clientX - ox) / scale, y: (e.clientY - oy) / scale };
+    const r = canvas.getBoundingClientRect();
+    return { x: (e.clientX - r.left - ox) / scale, y: (e.clientY - r.top - oy) / scale };
   }
   function playerFor(pt) {
     if (mode !== 'pvp') return bottom;
@@ -329,9 +332,9 @@
   function drawCourt() {
     // трава вокруг
     ctx.fillStyle = '#2f7d4f';
-    ctx.fillRect(-ox / scale, -oy / scale, innerWidth / scale, innerHeight / scale);
+    ctx.fillRect(-ox / scale, -oy / scale, cw / scale, ch / scale);
     ctx.fillStyle = '#358a58';
-    for (let y = -200; y < H + 200; y += 40) ctx.fillRect(-ox / scale, y, innerWidth / scale, 20);
+    for (let y = -200; y < H + 200; y += 40) ctx.fillRect(-ox / scale, y, cw / scale, 20);
 
     // покрытие
     ctx.fillStyle = '#3c6fb0';
