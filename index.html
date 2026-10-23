@@ -1,0 +1,629 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Диана на велосипеде</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Russo+One&family=Nunito:wght@600;800&display=swap">
+<style>
+  /* Layout: one full-screen canvas; the world scales to fit, HUD is drawn on the canvas */
+  :root {
+    --sky-top: #7fcdf7;
+    --sky-bottom: #e3f6ff;
+    --ink: #2b2350;
+    --accent: #ff4f8b;
+    --font-display: "Russo One", "Arial Black", system-ui, sans-serif;
+    --font-body: "Nunito", system-ui, sans-serif;
+    color-scheme: light;
+  }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--sky-bottom);
+    color: var(--ink);
+    font-family: var(--font-body);
+    overflow: hidden;
+    touch-action: manipulation;
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  #game { display: block; width: 100%; height: 100%; cursor: pointer; }
+  #game:focus-visible { outline: 3px solid var(--accent); outline-offset: -3px; }
+</style>
+</head>
+<body>
+
+<canvas id="game" tabindex="0" aria-label="Игра: Диана на велосипеде. Нажмите, чтобы прыгнуть."></canvas>
+
+<script>
+(() => {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+
+  // ---- World constants (in world units; the world is 300 units tall) ----
+  const WORLD_H = 300;
+  const GROUND_Y = 232;
+  const PLAYER_X = 90;
+  const GRAVITY = 2300;
+  const JUMP_V = 760;
+  const START_SPEED = 330;
+  const MAX_SPEED = 860;
+  const SPEED_GAIN = 9; // units/s per second
+
+  const FONT_DISPLAY = '"Russo One", "Arial Black", sans-serif';
+  const FONT_BODY = '"Nunito", system-ui, sans-serif';
+
+  const reduceMotion = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  let scale = 1, viewW = 800, viewH = 300, offY = 0, dpr = 1;
+
+  function resize() {
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const w = canvas.clientWidth, h = canvas.clientHeight;
+    canvas.width = Math.round(w * dpr);
+    canvas.height = Math.round(h * dpr);
+    scale = Math.min(w / 620, h / WORLD_H);
+    viewW = w / scale;
+    viewH = h / scale;
+    offY = (viewH - WORLD_H) / 2;
+  }
+  window.addEventListener('resize', resize);
+
+  // ---- Storage (optional) ----
+  function loadBest() {
+    try { return parseInt(localStorage.getItem('diana-best') || '0', 10) || 0; } catch (e) { return 0; }
+  }
+  function saveBest(v) {
+    try { localStorage.setItem('diana-best', String(v)); } catch (e) {}
+  }
+
+  // ---- Sound ----
+  let audio = null;
+  function beep(freq, dur, type = 'square', vol = 0.06, slide = 0) {
+    try {
+      if (!audio) audio = new (window.AudioContext || window.webkitAudioContext)();
+      const t = audio.currentTime;
+      const o = audio.createOscillator();
+      const g = audio.createGain();
+      o.type = type;
+      o.frequency.setValueAtTime(freq, t);
+      if (slide) o.frequency.exponentialRampToValueAtTime(freq * slide, t + dur);
+      g.gain.setValueAtTime(vol, t);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+      o.connect(g).connect(audio.destination);
+      o.start(t);
+      o.stop(t + dur);
+    } catch (e) {}
+  }
+
+  // ---- State ----
+  let state = 'ready'; // ready | running | over
+  let best = loadBest();
+  let score = 0, distance = 0, speed = START_SPEED;
+  let py = GROUND_Y, vy = 0, onGround = true;
+  let crank = 0, wheelRot = 0, hairSwing = 0;
+  let obstacles = [], stars = [], particles = [];
+  let nextSpawn = 0, bonus = 0;
+  let overAt = 0, flash = 0, milestone = 0;
+  let clouds = [], hills1 = 0, hills2 = 0, groundOff = 0;
+
+  for (let i = 0; i < 6; i++) clouds.push({ x: Math.random() * 900, y: 20 + Math.random() * 90, s: 0.6 + Math.random() * 0.7 });
+
+  function reset() {
+    score = 0; distance = 0; speed = START_SPEED;
+    py = GROUND_Y; vy = 0; onGround = true;
+    obstacles = []; stars = []; particles = [];
+    nextSpawn = 380; milestone = 0; bonus = 0;
+  }
+
+  // ---- Input ----
+  function press() {
+    if (state === 'ready') { reset(); state = 'running'; jump(); return; }
+    if (state === 'over') {
+      if (performance.now() - overAt > 450) { reset(); state = 'running'; }
+      return;
+    }
+    jump();
+  }
+  function jump() {
+    if (!onGround) return;
+    vy = -JUMP_V; onGround = false;
+    beep(520, 0.12, 'square', 0.05, 1.8);
+    for (let i = 0; i < 6; i++) particles.push(dust(PLAYER_X - 18, GROUND_Y));
+  }
+  canvas.addEventListener('pointerdown', e => { e.preventDefault(); press(); });
+  window.addEventListener('keydown', e => {
+    if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'Enter' || e.code === 'KeyW') {
+      e.preventDefault();
+      if (!e.repeat) press();
+    }
+  });
+
+  // ---- Spawning ----
+  const TYPES = ['cone', 'rock', 'box', 'puddle', 'cones2', 'hedge'];
+  const SIZES = {
+    cone: { w: 22, h: 30 },
+    rock: { w: 34, h: 22 },
+    box: { w: 28, h: 28 },
+    puddle: { w: 46, h: 8 },
+    cones2: { w: 46, h: 30 },
+    hedge: { w: 40, h: 36 },
+  };
+
+  function spawn() {
+    let pool = TYPES.slice(0, 4);
+    if (score > 150) pool.push('cones2');
+    if (score > 300) pool.push('hedge');
+    const type = pool[Math.floor(Math.random() * pool.length)];
+    const s = SIZES[type];
+    obstacles.push({ type, x: viewW + 40, w: s.w, h: s.h, passed: false });
+    if (Math.random() < 0.35) {
+      stars.push({ x: viewW + 40 + s.w / 2, y: GROUND_Y - 80 - Math.random() * 40, t: Math.random() * 6, got: false });
+    }
+    const airDist = speed * (2 * JUMP_V / GRAVITY);
+    nextSpawn = airDist + 90 + Math.random() * speed * 1.3;
+  }
+
+  function dust(x, y) {
+    return { x, y, vx: -40 - Math.random() * 80, vy: -40 - Math.random() * 60, life: 0.5, max: 0.5, c: '#d9b27a', r: 2 + Math.random() * 2 };
+  }
+
+  // ---- Update ----
+  function update(dt) {
+    const sp = state === 'running' ? speed : (state === 'ready' ? 120 : 0);
+    hills1 = (hills1 + sp * 0.15 * dt) % 2000;
+    hills2 = (hills2 + sp * 0.35 * dt) % 2000;
+    groundOff = (groundOff + sp * dt) % 40;
+    for (const c of clouds) {
+      c.x -= (sp * 0.06 + 6) * dt * c.s;
+      if (c.x < -120) { c.x = viewW + 40 + Math.random() * 200; c.y = 20 + Math.random() * 90; }
+    }
+    if (state !== 'over') {
+      crank += sp * dt * 0.045;
+      wheelRot += sp * dt / 14;
+    }
+    hairSwing += dt * (4 + sp / 120);
+
+    for (const p of particles) { p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 300 * dt; p.life -= dt; }
+    particles = particles.filter(p => p.life > 0);
+    if (flash > 0) flash -= dt;
+
+    if (state !== 'running') return;
+
+    speed = Math.min(MAX_SPEED, speed + SPEED_GAIN * dt);
+    distance += speed * dt;
+    score = Math.floor(distance / 40) + bonus;
+    if (Math.floor(score / 100) > milestone) {
+      milestone = Math.floor(score / 100);
+      flash = 0.6;
+      beep(880, 0.08, 'square', 0.04); setTimeout(() => beep(1175, 0.12, 'square', 0.04), 90);
+    }
+
+    // physics
+    if (!onGround) {
+      vy += GRAVITY * dt;
+      py += vy * dt;
+      if (py >= GROUND_Y) {
+        py = GROUND_Y; vy = 0; onGround = true;
+        for (let i = 0; i < 5; i++) particles.push(dust(PLAYER_X + (Math.random() * 30 - 15), GROUND_Y));
+      }
+    } else if (Math.random() < dt * 8) {
+      particles.push(dust(PLAYER_X - 20, GROUND_Y));
+    }
+
+    nextSpawn -= speed * dt;
+    if (nextSpawn <= 0) spawn();
+
+    for (const o of obstacles) o.x -= speed * dt;
+    obstacles = obstacles.filter(o => o.x + o.w > -20);
+    for (const s of stars) { s.x -= speed * dt; s.t += dt; }
+    stars = stars.filter(s => s.x > -20 && !s.got);
+
+    // collisions: bike box + body box, a bit forgiving
+    const boxes = [
+      { l: PLAYER_X - 28, r: PLAYER_X + 28, t: py - 28, b: py - 2 },
+      { l: PLAYER_X - 10, r: PLAYER_X + 12, t: py - 74, b: py - 28 },
+    ];
+    for (const o of obstacles) {
+      const ob = { l: o.x + 4, r: o.x + o.w - 4, t: GROUND_Y - o.h + 3, b: GROUND_Y };
+      if (o.type === 'puddle') { ob.t = GROUND_Y - 4; }
+      if (boxes.some(b => b.l < ob.r && b.r > ob.l && b.t < ob.b && b.b > ob.t)) { crash(); return; }
+    }
+    for (const s of stars) {
+      if (Math.abs(s.x - PLAYER_X) < 26 && Math.abs(s.y - (py - 45)) < 38) {
+        s.got = true; bonus += 10;
+        beep(1320, 0.1, 'triangle', 0.07, 1.5);
+        for (let i = 0; i < 10; i++) {
+          const a = Math.random() * Math.PI * 2;
+          particles.push({ x: s.x, y: s.y, vx: Math.cos(a) * 120, vy: Math.sin(a) * 120, life: 0.5, max: 0.5, c: '#ffd23f', r: 2.5 });
+        }
+      }
+    }
+  }
+  function crash() {
+    state = 'over';
+    overAt = performance.now();
+    beep(220, 0.35, 'sawtooth', 0.06, 0.4);
+    if (score > best) { best = score; saveBest(best); }
+    for (let i = 0; i < 14; i++) {
+      const a = Math.random() * Math.PI * 2;
+      particles.push({ x: PLAYER_X + 20, y: py - 20, vx: Math.cos(a) * 160, vy: Math.sin(a) * 160 - 60, life: 0.7, max: 0.7, c: i % 2 ? '#ff4f8b' : '#ffd23f', r: 3 });
+    }
+  }
+
+  // ---- Drawing helpers ----
+  function line(x1, y1, x2, y2) { ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke(); }
+  function circle(x, y, r, fill) { ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); if (fill) { ctx.fillStyle = fill; ctx.fill(); } }
+
+  function drawSky() {
+    const g = ctx.createLinearGradient(0, 0, 0, viewH);
+    g.addColorStop(0, '#7fcdf7');
+    g.addColorStop(0.75, '#e3f6ff');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, viewW, viewH);
+    // sun
+    ctx.save();
+    ctx.translate(viewW - 90, offY + 60);
+    circle(0, 0, 34, 'rgba(255,224,102,0.35)');
+    circle(0, 0, 24, '#ffe066');
+    ctx.restore();
+    // clouds
+    for (const c of clouds) {
+      ctx.save();
+      ctx.translate(c.x, offY + c.y);
+      ctx.scale(c.s, c.s);
+      ctx.fillStyle = 'rgba(255,255,255,0.95)';
+      ctx.beginPath();
+      ctx.arc(0, 0, 18, 0, Math.PI * 2);
+      ctx.arc(22, -8, 22, 0, Math.PI * 2);
+      ctx.arc(46, 0, 16, 0, Math.PI * 2);
+      ctx.rect(0, 0, 46, 16);
+      ctx.fill();
+      ctx.restore();
+    }
+  }
+
+  function drawHills(off, baseY, amp, period, color) {
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.moveTo(0, viewH);
+    for (let x = 0; x <= viewW + 10; x += 10) {
+      const wx = x + off;
+      const y = baseY - amp * (0.6 + 0.4 * Math.sin(wx / period)) * (0.7 + 0.3 * Math.sin(wx / (period * 0.37) + 1));
+      ctx.lineTo(x, offY + y);
+    }
+    ctx.lineTo(viewW, viewH);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  function drawGround() {
+    const gy = offY + GROUND_Y;
+    // grass strip
+    ctx.fillStyle = '#5fbf6e';
+    ctx.fillRect(0, gy - 6, viewW, 8);
+    // path
+    ctx.fillStyle = '#f0c987';
+    ctx.fillRect(0, gy + 2, viewW, 26);
+    ctx.fillStyle = '#e2b26a';
+    ctx.fillRect(0, gy + 2, viewW, 3);
+    // dashes for speed
+    ctx.fillStyle = '#d9a35a';
+    for (let x = -groundOff; x < viewW; x += 40) ctx.fillRect(x, gy + 14, 16, 3);
+    // soil below
+    ctx.fillStyle = '#7ccc7f';
+    ctx.fillRect(0, gy + 28, viewW, viewH - gy);
+    ctx.fillStyle = '#6cbb70';
+    for (let x = -((groundOff * 0.999) % 60); x < viewW; x += 60) {
+      ctx.fillRect(x + 10, gy + 40, 4, 4);
+      ctx.fillRect(x + 38, gy + 56, 3, 3);
+    }
+  }
+
+  function drawObstacle(o) {
+    const x = o.x, gy = offY + GROUND_Y;
+    ctx.save();
+    switch (o.type) {
+      case 'cone':
+      case 'cones2': {
+        const n = o.type === 'cones2' ? 2 : 1;
+        for (let i = 0; i < n; i++) {
+          const cx = x + 11 + i * 24;
+          ctx.fillStyle = '#ff7a1a';
+          ctx.beginPath();
+          ctx.moveTo(cx - 9, gy - 2); ctx.lineTo(cx - 2, gy - 30); ctx.lineTo(cx + 2, gy - 30); ctx.lineTo(cx + 9, gy - 2);
+          ctx.closePath(); ctx.fill();
+          ctx.fillStyle = '#fff';
+          ctx.fillRect(cx - 6, gy - 18, 12, 4);
+          ctx.fillStyle = '#ff7a1a';
+          ctx.fillRect(cx - 11, gy - 3, 22, 4);
+        }
+        break;
+      }
+      case 'rock': {
+        ctx.fillStyle = '#8d8aa3';
+        ctx.beginPath();
+        ctx.moveTo(x, gy + 1);
+        ctx.quadraticCurveTo(x + 2, gy - 18, x + 14, gy - 22);
+        ctx.quadraticCurveTo(x + 30, gy - 22, x + 34, gy + 1);
+        ctx.closePath(); ctx.fill();
+        ctx.fillStyle = '#a9a6bf';
+        ctx.beginPath(); ctx.ellipse(x + 13, gy - 15, 6, 3, -0.4, 0, Math.PI * 2); ctx.fill();
+        break;
+      }
+      case 'box': {
+        ctx.fillStyle = '#c98a4b';
+        ctx.fillRect(x, gy - 28, 28, 28);
+        ctx.strokeStyle = '#9a6331'; ctx.lineWidth = 2.5;
+        ctx.strokeRect(x + 1.5, gy - 26.5, 25, 25);
+        line(x + 2, gy - 26, x + 26, gy - 2);
+        line(x + 26, gy - 26, x + 2, gy - 2);
+        break;
+      }
+      case 'puddle': {
+        ctx.fillStyle = '#5aa9e6';
+        ctx.beginPath(); ctx.ellipse(x + 23, gy + 4, 24, 6, 0, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = 'rgba(255,255,255,0.6)';
+        ctx.beginPath(); ctx.ellipse(x + 16, gy + 3, 8, 1.6, 0, 0, Math.PI * 2); ctx.fill();
+        break;
+      }
+      case 'hedge': {
+        ctx.fillStyle = '#3f9a52';
+        ctx.beginPath();
+        ctx.arc(x + 10, gy - 14, 12, 0, Math.PI * 2);
+        ctx.arc(x + 30, gy - 14, 12, 0, Math.PI * 2);
+        ctx.arc(x + 20, gy - 24, 13, 0, Math.PI * 2);
+        ctx.rect(x, gy - 14, 40, 14);
+        ctx.fill();
+        ctx.fillStyle = '#ff6fa3';
+        circle(x + 12, gy - 22, 2.5, '#ff6fa3');
+        circle(x + 27, gy - 28, 2.5, '#fff');
+        circle(x + 33, gy - 12, 2.5, '#ff6fa3');
+        break;
+      }
+    }
+    ctx.restore();
+  }
+
+  function drawStar(s) {
+    const y = offY + s.y + Math.sin(s.t * 4) * 4;
+    ctx.save();
+    ctx.translate(s.x, y);
+    ctx.rotate(Math.sin(s.t * 2) * 0.2);
+    ctx.fillStyle = '#ffd23f';
+    ctx.strokeStyle = '#e8a700';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    for (let i = 0; i < 10; i++) {
+      const r = i % 2 ? 4.5 : 10;
+      const a = -Math.PI / 2 + i * Math.PI / 5;
+      ctx.lineTo(Math.cos(a) * r, Math.sin(a) * r);
+    }
+    ctx.closePath(); ctx.fill(); ctx.stroke();
+    ctx.restore();
+  }
+
+  // two-bone IK: returns knee point, knee bends forward
+  function knee(hx, hy, fx, fy, l1, l2) {
+    const dx = fx - hx, dy = fy - hy;
+    let d = Math.hypot(dx, dy);
+    d = Math.min(d, l1 + l2 - 0.01);
+    const base = Math.atan2(dy, dx);
+    const a = Math.acos(Math.max(-1, Math.min(1, (l1 * l1 + d * d - l2 * l2) / (2 * l1 * d))));
+    return [hx + Math.cos(base - a) * l1, hy + Math.sin(base - a) * l1];
+  }
+
+  function drawWheel(cx, cy) {
+    ctx.strokeStyle = '#2b2350'; ctx.lineWidth = 3.2;
+    circle(cx, cy, 13); ctx.stroke();
+    ctx.strokeStyle = '#b9b4d6'; ctx.lineWidth = 1;
+    for (let i = 0; i < 4; i++) {
+      const a = wheelRot + i * Math.PI / 4;
+      line(cx - Math.cos(a) * 11, cy - Math.sin(a) * 11, cx + Math.cos(a) * 11, cy + Math.sin(a) * 11);
+    }
+    circle(cx, cy, 2, '#2b2350');
+  }
+
+  function drawDiana() {
+    const x = PLAYER_X, y = offY + py;
+    const tilt = onGround ? 0 : Math.max(-0.25, Math.min(0.2, vy / 3000));
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(tilt);
+    ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+
+    const rear = [-19, -13], front = [20, -13];
+    const bb = [-1, -15], seat = [-8, -34], head = [14, -38];
+    const ca = crank;
+    const p1 = [bb[0] + Math.cos(ca) * 6, bb[1] + Math.sin(ca) * 6];
+    const p2 = [bb[0] - Math.cos(ca) * 6, bb[1] - Math.sin(ca) * 6];
+    const hip = [-7, -38];
+    const shoulder = [3, -58];
+    const hand = [15, -42];
+
+    // far leg (behind bike)
+    ctx.strokeStyle = '#d63d73'; ctx.lineWidth = 5;
+    let k = knee(hip[0], hip[1], p2[0], p2[1], 13, 13);
+    line(hip[0], hip[1], k[0], k[1]);
+    ctx.strokeStyle = '#f2c3a4'; ctx.lineWidth = 4;
+    line(k[0], k[1], p2[0], p2[1]);
+    ctx.strokeStyle = '#2b2350'; ctx.lineWidth = 4;
+    line(p2[0] - 2, p2[1] + 1, p2[0] + 4, p2[1] + 1);
+
+    drawWheel(rear[0], rear[1]);
+    drawWheel(front[0], front[1]);
+
+    // frame
+    ctx.strokeStyle = '#6a4cff'; ctx.lineWidth = 3.5;
+    ctx.beginPath();
+    ctx.moveTo(rear[0], rear[1]); ctx.lineTo(bb[0], bb[1]); ctx.lineTo(seat[0] + 1, seat[1] + 2);
+    ctx.closePath(); ctx.stroke();
+    line(bb[0], bb[1], 12, -32);
+    line(seat[0] + 2, seat[1] + 4, 12, -32);
+    line(12, -32, front[0], front[1]);
+    line(12, -32, 13, -40);
+    // handlebar + basket
+    ctx.strokeStyle = '#2b2350'; ctx.lineWidth = 3;
+    line(11, -41, 18, -42);
+    ctx.fillStyle = '#ffd23f';
+    ctx.fillRect(18, -36, 10, 8);
+    ctx.strokeStyle = '#e8a700'; ctx.lineWidth = 1;
+    ctx.strokeRect(18, -36, 10, 8);
+    // seat
+    ctx.strokeStyle = '#2b2350'; ctx.lineWidth = 4;
+    line(seat[0] - 5, seat[1], seat[0] + 4, seat[1]);
+    // crank
+    ctx.strokeStyle = '#2b2350'; ctx.lineWidth = 2;
+    line(p1[0], p1[1], p2[0], p2[1]);
+    circle(bb[0], bb[1], 3, '#b9b4d6');
+
+    // ponytail
+    const sw = Math.sin(hairSwing) * 3;
+    ctx.fillStyle = '#5a3420';
+    ctx.beginPath();
+    ctx.moveTo(head[0] - 6, head[1] - 4);
+    ctx.quadraticCurveTo(head[0] - 18, head[1] - 4 + sw, head[0] - 24, head[1] + 6 + sw);
+    ctx.quadraticCurveTo(head[0] - 14, head[1] + 4, head[0] - 5, head[1] + 2);
+    ctx.closePath(); ctx.fill();
+
+    // torso (dress top)
+    ctx.fillStyle = '#ff4f8b';
+    ctx.beginPath();
+    ctx.moveTo(hip[0] - 5, hip[1] + 2);
+    ctx.lineTo(shoulder[0] - 5, shoulder[1]);
+    ctx.lineTo(shoulder[0] + 5, shoulder[1] + 1);
+    ctx.lineTo(hip[0] + 7, hip[1] + 2);
+    ctx.closePath(); ctx.fill();
+
+    // near leg
+    ctx.strokeStyle = '#ff4f8b'; ctx.lineWidth = 5.5;
+    k = knee(hip[0], hip[1], p1[0], p1[1], 13, 13);
+    line(hip[0], hip[1], k[0], k[1]);
+    ctx.strokeStyle = '#f7d2b8'; ctx.lineWidth = 4;
+    line(k[0], k[1], p1[0], p1[1]);
+    ctx.strokeStyle = '#2b2350'; ctx.lineWidth = 4;
+    line(p1[0] - 2, p1[1] + 1, p1[0] + 4, p1[1] + 1);
+
+    // arm
+    ctx.strokeStyle = '#f7d2b8'; ctx.lineWidth = 3.5;
+    const elbow = [shoulder[0] + 8, shoulder[1] + 9];
+    line(shoulder[0], shoulder[1] + 2, elbow[0], elbow[1]);
+    line(elbow[0], elbow[1], hand[0], hand[1]);
+
+    // head
+    const hx = shoulder[0] + 6, hy = shoulder[1] - 10;
+    circle(hx, hy, 9, '#f7d2b8');
+    // hair cap
+    ctx.fillStyle = '#5a3420';
+    ctx.beginPath();
+    ctx.arc(hx, hy, 9.5, Math.PI * 0.95, Math.PI * 1.95);
+    ctx.quadraticCurveTo(hx + 4, hy - 4, hx - 2, hy - 3);
+    ctx.quadraticCurveTo(hx - 6, hy - 1, hx - 9, hy + 2);
+    ctx.closePath(); ctx.fill();
+    // bow
+    ctx.fillStyle = '#ffd23f';
+    ctx.beginPath();
+    ctx.moveTo(hx - 7, hy - 7);
+    ctx.lineTo(hx - 13, hy - 11); ctx.lineTo(hx - 12, hy - 3); ctx.closePath();
+    ctx.moveTo(hx - 7, hy - 7);
+    ctx.lineTo(hx - 3, hy - 14); ctx.lineTo(hx - 1, hy - 7); ctx.closePath();
+    ctx.fill();
+    // face
+    if (state === 'over') {
+      ctx.strokeStyle = '#2b2350'; ctx.lineWidth = 1.3;
+      line(hx + 3, hy - 2, hx + 6, hy + 1); line(hx + 6, hy - 2, hx + 3, hy + 1);
+      circle(hx + 5, hy + 5, 1.6, '#2b2350');
+    } else {
+      circle(hx + 5, hy - 1, 1.3, '#2b2350');
+      ctx.strokeStyle = '#c2456c'; ctx.lineWidth = 1.3;
+      ctx.beginPath(); ctx.arc(hx + 4.5, hy + 3, 2.4, 0.2, Math.PI - 0.6); ctx.stroke();
+      circle(hx + 1.5, hy + 2.5, 1.8, 'rgba(255,120,150,0.45)');
+    }
+
+    ctx.restore();
+  }
+
+  function drawShadow() {
+    const h = GROUND_Y - py;
+    const s = Math.max(0.4, 1 - h / 160);
+    ctx.fillStyle = 'rgba(43,35,80,0.18)';
+    ctx.beginPath();
+    ctx.ellipse(PLAYER_X, offY + GROUND_Y + 3, 30 * s, 4 * s, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function text(str, x, y, size, color, align = 'center', font = FONT_DISPLAY, weight = 400) {
+    ctx.font = `${weight} ${size}px ${font}`;
+    ctx.textAlign = align;
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = color;
+    ctx.fillText(str, x, y);
+  }
+
+  function pad(n) { return String(n).padStart(5, '0'); }
+
+  function drawHUD() {
+    const top = offY + 22;
+    const blink = flash > 0 && Math.floor(flash * 10) % 2 === 0;
+    if (!blink) text(pad(score), viewW - 20, top, 20, '#2b2350', 'right');
+    text('РЕКОРД ' + pad(best), viewW - 100, top, 13, 'rgba(43,35,80,0.55)', 'right');
+
+    if (state === 'ready') {
+      panel(viewW / 2, offY + 108, 'Диана на велосипеде', 'Нажми на экран или пробел, чтобы прыгать');
+    } else if (state === 'over') {
+      const rec = score >= best && score > 0 ? 'Новый рекорд: ' + score + '!' : 'Счёт: ' + score;
+      panel(viewW / 2, offY + 108, 'Ой! Препятствие', rec + ' · нажми, чтобы ехать снова');
+    }
+  }
+
+  function panel(cx, cy, title, sub) {
+    ctx.save();
+    ctx.font = `800 14px ${FONT_BODY}`;
+    const w = Math.min(viewW - 32, Math.max(300, ctx.measureText(sub).width + 50));
+    const h = 76;
+    ctx.fillStyle = 'rgba(255,255,255,0.88)';
+    ctx.beginPath();
+    ctx.roundRect ? ctx.roundRect(cx - w / 2, cy - h / 2, w, h, 14) : ctx.rect(cx - w / 2, cy - h / 2, w, h);
+    ctx.fill();
+    text(title, cx, cy - 13, 22, '#ff4f8b');
+    text(sub, cx, cy + 16, 14, '#2b2350', 'center', FONT_BODY, 800);
+    ctx.restore();
+  }
+
+  function draw() {
+    ctx.setTransform(dpr * scale, 0, 0, dpr * scale, 0, 0);
+    drawSky();
+    drawHills(hills1, 175, 55, 140, '#b5e3c0');
+    drawHills(hills2 + 500, 205, 40, 90, '#8fd19c');
+    drawGround();
+    for (const s of stars) drawStar(s);
+    for (const o of obstacles) drawObstacle(o);
+    drawShadow();
+    drawDiana();
+    for (const p of particles) {
+      ctx.globalAlpha = Math.max(0, p.life / p.max);
+      circle(p.x, offY + p.y, p.r, p.c);
+    }
+    ctx.globalAlpha = 1;
+    drawHUD();
+  }
+
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.033, (now - last) / 1000);
+    last = now;
+    update(reduceMotion && state !== 'running' ? 0 : dt);
+    draw();
+    requestAnimationFrame(frame);
+  }
+
+  resize();
+  reset();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
