@@ -1,0 +1,632 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Угадай страну</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Unbounded:wght@500;700&family=Golos+Text:wght@400;500;700&display=swap">
+<style>
+  /* Layout: full-screen atlas. Map fills the stage; the turn panel sits below it (right of it on wide screens). */
+  :root {
+    --sea: #cfe3ec;
+    --sea-line: #b5d2de;
+    --land: #f3efe4;
+    --land-off: #e4e0d4;
+    --border: #a9a291;
+    --target: #e8590c;
+    --target-glow: rgba(232, 89, 12, .28);
+    --ink: #1d2b36;
+    --muted: #5d6b75;
+    --panel: #ffffff;
+    --panel-2: #f2f5f7;
+    --line: #d9e1e6;
+    --good: #2b8a3e;
+    --bad: #c92a2a;
+    --font-display: "Unbounded", "Arial Black", system-ui, sans-serif;
+    --font-body: "Golos Text", system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --sea: #0f2231; --sea-line: #173246; --land: #2c3a44; --land-off: #222d35; --border: #4d606d;
+      --target: #ff8a3d; --target-glow: rgba(255, 138, 61, .3);
+      --ink: #e7eef2; --muted: #93a4af; --panel: #15232e; --panel-2: #1c2d3a; --line: #2a3d4b;
+      --good: #69db7c; --bad: #ff8787; color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --sea: #0f2231; --sea-line: #173246; --land: #2c3a44; --land-off: #222d35; --border: #4d606d;
+    --target: #ff8a3d; --target-glow: rgba(255, 138, 61, .3);
+    --ink: #e7eef2; --muted: #93a4af; --panel: #15232e; --panel-2: #1c2d3a; --line: #2a3d4b;
+    --good: #69db7c; --bad: #ff8787; color-scheme: dark;
+  }
+
+  [hidden] { display: none !important; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: var(--panel); color: var(--ink);
+    font: 15px/1.45 var(--font-body);
+  }
+  button, input, select { font: inherit; color: inherit; }
+  button { cursor: pointer; }
+  :focus-visible { outline: 3px solid var(--target); outline-offset: 2px; }
+
+  .app { height: 100%; display: grid; grid-template-rows: auto 1fr auto; }
+  @media (min-width: 900px) {
+    .app { grid-template-columns: 1fr 380px; grid-template-rows: auto 1fr; }
+    .topbar { grid-column: 1 / -1; }
+    .panel { border-top: 0; border-left: 1px solid var(--line); overflow-y: auto; }
+  }
+
+  .topbar {
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    padding-block: 10px;
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+    border-bottom: 1px solid var(--line);
+  }
+  .brand { font: 700 17px/1 var(--font-display); letter-spacing: -.01em; margin: 0; white-space: nowrap; }
+  .brand span { color: var(--target); }
+  .round { font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .scores { display: flex; gap: 6px; flex-wrap: wrap; margin-left: auto; }
+  .chip {
+    display: inline-flex; align-items: baseline; gap: 6px;
+    padding: 4px 10px; border-radius: 999px; background: var(--panel-2);
+    font-size: 13px; border: 1.5px solid transparent;
+  }
+  .chip b { font: 700 14px/1 var(--font-display); font-variant-numeric: tabular-nums; }
+  .chip.active { border-color: var(--target); }
+
+  .stage { position: relative; min-height: 0; background: var(--sea); overflow: hidden; }
+  #map { display: block; width: 100%; height: 100%; }
+  #map .land { fill: var(--land); stroke: var(--border); stroke-width: .35; vector-effect: non-scaling-stroke; }
+  #map .land.off { fill: var(--land-off); }
+  #map .land.target { fill: var(--target); stroke: var(--ink); stroke-width: 1; }
+  #map .land.revealed { fill: var(--target); }
+  #map .ring { fill: none; stroke: var(--target); stroke-width: 2.5; vector-effect: non-scaling-stroke; }
+  #map .halo { fill: var(--target-glow); }
+  #map .grid { fill: none; stroke: var(--sea-line); stroke-width: .6; vector-effect: non-scaling-stroke; }
+  @media (prefers-reduced-motion: no-preference) {
+    #map .land.target { animation: pulse 1.6s ease-in-out infinite; }
+    #map .halo { animation: halo 1.6s ease-out infinite; transform-box: fill-box; transform-origin: center; }
+  }
+  @keyframes pulse { 50% { fill-opacity: .55; } }
+  @keyframes halo { from { transform: scale(.4); opacity: 1; } to { transform: scale(1.4); opacity: 0; } }
+
+  .zoom-toggle {
+    position: absolute; right: max(12px, env(safe-area-inset-right, 0px)); bottom: 12px;
+    padding: 7px 12px; border-radius: 8px; border: 1px solid var(--line);
+    background: var(--panel); font-size: 13px; font-weight: 500;
+  }
+
+  .panel {
+    display: flex; flex-direction: column; gap: 14px;
+    padding-block: 16px calc(16px + env(safe-area-inset-bottom, 0px));
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+    border-top: 1px solid var(--line); background: var(--panel);
+    max-height: 52vh; overflow-y: auto;
+  }
+  @media (min-width: 900px) { .panel { max-height: none; } }
+  .eyebrow { font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin: 0; }
+  .turn-name { font: 700 22px/1.15 var(--font-display); margin: 2px 0 0; text-wrap: balance; }
+
+  .guess { display: flex; gap: 8px; }
+  .guess input {
+    flex: 1; min-width: 0; padding: 11px 12px; border-radius: 10px;
+    border: 1.5px solid var(--line); background: var(--panel-2);
+  }
+  .guess input:focus { border-color: var(--target); outline: none; }
+  .btn {
+    padding: 11px 16px; border-radius: 10px; border: 0; font-weight: 700;
+    background: var(--ink); color: var(--panel); white-space: nowrap;
+  }
+  .btn.ghost { background: transparent; color: var(--muted); border: 1px solid var(--line); font-weight: 500; }
+  .btn:disabled { opacity: .45; cursor: default; }
+
+  .hints { display: grid; gap: 8px; }
+  .hint {
+    display: grid; grid-template-columns: 26px 1fr; gap: 10px; align-items: start;
+    padding: 10px 12px; border-radius: 10px; background: var(--panel-2); min-width: 0;
+  }
+  .hint .n {
+    width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center;
+    font: 700 12px/1 var(--font-display); background: var(--target); color: var(--panel);
+  }
+  .hint p { margin: 0; min-width: 0; }
+  .hint small { display: block; color: var(--muted); font-size: 12px; }
+  .hint-row { display: flex; gap: 8px; flex-wrap: wrap; }
+  .hint-btn {
+    flex: 1; padding: 10px 12px; border-radius: 10px; font-weight: 500;
+    border: 1.5px dashed var(--target); background: transparent; color: var(--target);
+  }
+
+  .verdict { padding: 14px; border-radius: 12px; background: var(--panel-2); display: grid; gap: 4px; }
+  .verdict .head { font: 700 18px/1.2 var(--font-display); }
+  .verdict.good .head { color: var(--good); }
+  .verdict.bad .head { color: var(--bad); }
+  .verdict p { margin: 0; color: var(--muted); }
+
+  /* Overlay screens: setup and results */
+  .overlay {
+    position: fixed; inset: 0; z-index: 20; display: grid; place-items: center;
+    background: color-mix(in srgb, var(--sea) 80%, transparent);
+    backdrop-filter: blur(3px);
+    padding-block: calc(16px + env(safe-area-inset-top, 0px)) calc(16px + env(safe-area-inset-bottom, 0px));
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+    overflow-y: auto;
+  }
+  .card {
+    width: 100%; max-width: 440px; background: var(--panel); border-radius: 16px;
+    padding: 22px; display: grid; gap: 16px; box-shadow: 0 20px 60px rgba(0, 0, 0, .18);
+  }
+  .card h2 { font: 700 24px/1.15 var(--font-display); margin: 0; text-wrap: balance; }
+  .card h2 span { color: var(--target); }
+  .card .lead { margin: 0; color: var(--muted); }
+  .players { display: grid; gap: 8px; }
+  .player-row { display: flex; gap: 8px; }
+  .player-row input {
+    flex: 1; min-width: 0; padding: 10px 12px; border-radius: 10px;
+    border: 1.5px solid var(--line); background: var(--panel-2);
+  }
+  .icon-btn { width: 42px; border-radius: 10px; border: 1px solid var(--line); background: transparent; color: var(--muted); font-size: 18px; }
+  .field { display: grid; gap: 6px; }
+  .field label { font-size: 13px; color: var(--muted); }
+  .seg { display: flex; gap: 6px; }
+  .seg button {
+    flex: 1; padding: 9px 0; border-radius: 10px; border: 1.5px solid var(--line); background: transparent;
+    font-variant-numeric: tabular-nums;
+  }
+  .seg button[aria-pressed="true"] { border-color: var(--target); color: var(--target); font-weight: 700; }
+  .rules { margin: 0; padding-left: 18px; color: var(--muted); font-size: 13px; display: grid; gap: 2px; }
+
+  .standings { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+  .standings li {
+    display: grid; grid-template-columns: 28px 1fr auto; gap: 10px; align-items: center;
+    padding: 10px 12px; border-radius: 10px; background: var(--panel-2);
+  }
+  .standings li:first-child { outline: 2px solid var(--target); }
+  .standings .place { font: 700 14px/1 var(--font-display); color: var(--muted); }
+  .standings .pts { font: 700 18px/1 var(--font-display); font-variant-numeric: tabular-nums; text-align: right; }
+  .standings small { display: block; color: var(--muted); font-size: 12px; }
+</style>
+</head>
+<body>
+
+<div class="app">
+  <header class="topbar">
+    <h1 class="brand">Угадай <span>страну</span></h1>
+    <div class="round" id="round"></div>
+    <div class="scores" id="scores"></div>
+  </header>
+
+  <main class="stage">
+    <svg id="map" role="img" aria-label="Карта мира с подсвеченной загаданной страной"></svg>
+    <button class="zoom-toggle" id="zoomToggle" type="button">Весь мир</button>
+  </main>
+
+  <section class="panel" id="panel" aria-live="polite"></section>
+</div>
+
+<div class="overlay" id="setup" hidden>
+  <form class="card" id="setupForm">
+    <h2>Угадай <span>страну</span></h2>
+    <p class="lead">На карте подсвечивается случайная страна. Игроки по очереди называют её. Побеждает тот, кто угадает больше стран.</p>
+    <div class="field">
+      <label>Игроки</label>
+      <div class="players" id="players"></div>
+      <button class="btn ghost" type="button" id="addPlayer">+ Добавить игрока</button>
+    </div>
+    <div class="field">
+      <label>Стран на каждого игрока</label>
+      <div class="seg" id="rounds">
+        <button type="button" data-v="3">3</button>
+        <button type="button" data-v="5">5</button>
+        <button type="button" data-v="10">10</button>
+        <button type="button" data-v="15">15</button>
+      </div>
+    </div>
+    <ul class="rules">
+      <li>На ход одна попытка ответа.</li>
+      <li>Если не знаешь — открой до трёх подсказок: регион, столица, факт.</li>
+      <li>При равном счёте выше тот, кто брал меньше подсказок.</li>
+    </ul>
+    <button class="btn" type="submit">Начать игру</button>
+  </form>
+</div>
+
+<div class="overlay" id="results" hidden>
+  <div class="card">
+    <h2 id="winnerTitle"></h2>
+    <ol class="standings" id="standings"></ol>
+    <button class="btn" type="button" id="again">Сыграть ещё</button>
+  </div>
+</div>
+
+<datalist id="countryNames"></datalist>
+
+<script src="map-data.js"></script>
+<script src="countries.js"></script>
+<script>
+(() => {
+  const NS = "http://www.w3.org/2000/svg";
+  const $ = id => document.getElementById(id);
+  const MAP = window.WORLD_MAP;
+  const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  // ---------- country data ----------
+  const norm = s => s.toLowerCase().replace(/ё/g, "е").replace(/[^a-zа-я0-9]/g, "");
+  const shapes = new Map(MAP.countries.map(c => [c.id, c]));
+  const countries = window.COUNTRIES.map(([id, name, aliases, region, pop, capital, fact]) => ({
+    id, name, region, pop, capital, fact,
+    keys: [name, ...aliases.split(",").filter(Boolean)].map(norm),
+    shape: shapes.get(id),
+  }));
+  const playable = new Set(countries.map(c => c.id));
+
+  $("countryNames").append(...countries.map(c => new Option(c.name)).sort((a, b) => a.value.localeCompare(b.value, "ru")));
+
+  const fmtPop = m => m >= 1000 ? `${(m / 1000).toLocaleString("ru-RU", { maximumFractionDigits: 2 })} млрд`
+    : m >= 1 ? `${Math.round(m).toLocaleString("ru-RU")} млн`
+    : `${Math.round(m * 1000).toLocaleString("ru-RU")} тыс.`;
+  const letters = name => name.replace(/[^а-яё]/gi, "").length;
+
+  function hintsFor(c) {
+    return [
+      { label: "Регион и население", text: `${c.region}, около ${fmtPop(c.pop)} жителей` },
+      { label: "Столица", text: c.capital },
+      { label: "Факт", text: `${c.fact} Название начинается на «${c.name[0]}».` },
+    ];
+  }
+
+  function levenshtein(a, b) {
+    const row = Array.from({ length: b.length + 1 }, (_, i) => i);
+    for (let i = 1; i <= a.length; i++) {
+      let prev = row[0]; row[0] = i;
+      for (let j = 1; j <= b.length; j++) {
+        const tmp = row[j];
+        row[j] = Math.min(row[j] + 1, row[j - 1] + 1, prev + (a[i - 1] === b[j - 1] ? 0 : 1));
+        prev = tmp;
+      }
+    }
+    return row[b.length];
+  }
+  // Exact match on any name/alias; one typo forgiven on names of 6+ letters.
+  function matches(c, guess) {
+    const g = norm(guess);
+    if (!g) return false;
+    return c.keys.some(k => k === g || (k.length >= 6 && levenshtein(k, g) <= 1));
+  }
+
+  // ---------- map ----------
+  const svg = $("map");
+  const gLand = document.createElementNS(NS, "g");
+  const gMark = document.createElementNS(NS, "g");
+  const ocean = document.createElementNS(NS, "path");
+  ocean.setAttribute("class", "grid");
+  // Light graticule-ish lines for an atlas feel (straight lines in projected space).
+  let grid = "";
+  for (let x = 0; x <= MAP.w; x += MAP.w / 12) grid += `M${x},0V${MAP.h}`;
+  for (let y = 0; y <= MAP.h; y += MAP.h / 6) grid += `M0,${y}H${MAP.w}`;
+  ocean.setAttribute("d", grid);
+  svg.append(ocean, gLand, gMark);
+
+  const pathEls = new Map();
+  for (const c of MAP.countries) {
+    const p = document.createElementNS(NS, "path");
+    p.setAttribute("d", c.d);
+    p.setAttribute("class", playable.has(c.id) ? "land" : "land off");
+    gLand.append(p);
+    pathEls.set(c.id, p);
+  }
+
+  let view = { x: 0, y: 0, w: MAP.w, h: MAP.h };
+  let anim = 0;
+
+  function fitToBox(b, pad) {
+    // Expand a bbox to the stage's aspect ratio, with padding and a minimum size.
+    const r = svg.getBoundingClientRect();
+    const aspect = r.width / Math.max(r.height, 1) || MAP.w / MAP.h;
+    let w = Math.max((b[2] - b[0]) * pad, 140), h = Math.max((b[3] - b[1]) * pad, 140 / aspect);
+    if (w / h > aspect) h = w / aspect; else w = h * aspect;
+    if (w > MAP.w * 1.05) return world();
+    const cx = (b[0] + b[2]) / 2, cy = (b[1] + b[3]) / 2;
+    return { x: cx - w / 2, y: cy - h / 2, w, h };
+  }
+  function world() {
+    const r = svg.getBoundingClientRect();
+    const aspect = r.width / Math.max(r.height, 1) || MAP.w / MAP.h;
+    let w = MAP.w, h = MAP.h;
+    if (w / h > aspect) h = w / aspect; else w = h * aspect;
+    return { x: (MAP.w - w) / 2, y: (MAP.h - h) / 2, w, h };
+  }
+  function setView(v) {
+    view = v;
+    svg.setAttribute("viewBox", `${v.x} ${v.y} ${v.w} ${v.h}`);
+  }
+  function flyTo(target) {
+    cancelAnimationFrame(anim);
+    if (reduceMotion) return setView(target);
+    const from = { ...view }, t0 = performance.now(), dur = 900;
+    const ease = t => t < .5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+    const step = now => {
+      const t = Math.min((now - t0) / dur, 1), k = ease(t);
+      setView({
+        x: from.x + (target.x - from.x) * k, y: from.y + (target.y - from.y) * k,
+        w: from.w + (target.w - from.w) * k, h: from.h + (target.h - from.h) * k,
+      });
+      if (t < 1) anim = requestAnimationFrame(step);
+    };
+    anim = requestAnimationFrame(step);
+  }
+
+  // Country bbox; for countries spanning the antimeridian (Russia, Fiji, USA) use the main landmass side.
+  function boxOf(c) {
+    const b = c.shape.b;
+    if (b[2] - b[0] > MAP.w * .6) {
+      const cx = c.shape.c[0];
+      return cx > MAP.w / 2 ? [MAP.w * .55, b[1], MAP.w, b[3]] : [0, b[1], MAP.w * .45, b[3]];
+    }
+    return b;
+  }
+
+  let zoomed = true;
+  function frameTarget() {
+    if (!state.current) return flyTo(world());
+    flyTo(zoomed ? fitToBox(boxOf(state.current), 3.2) : world());
+    $("zoomToggle").textContent = zoomed ? "Весь мир" : "Приблизить";
+  }
+  $("zoomToggle").onclick = () => { zoomed = !zoomed; frameTarget(); };
+  new ResizeObserver(() => { cancelAnimationFrame(anim); setView(state.current && zoomed ? fitToBox(boxOf(state.current), 3.2) : world()); }).observe(svg);
+
+  function highlight(c, cls) {
+    for (const p of pathEls.values()) p.classList.remove("target", "revealed");
+    gMark.replaceChildren();
+    if (!c) return;
+    const p = pathEls.get(c.id);
+    p.classList.add(cls);
+    gLand.append(p); // bring to front so its border isn't covered
+    if (c.shape.a < 60) {
+      // Tiny countries get a marker so they're visible at any zoom.
+      const [x, y] = c.shape.c;
+      const halo = document.createElementNS(NS, "circle");
+      halo.setAttribute("class", "halo"); halo.setAttribute("cx", x); halo.setAttribute("cy", y); halo.setAttribute("r", 14);
+      const ring = document.createElementNS(NS, "circle");
+      ring.setAttribute("class", "ring"); ring.setAttribute("cx", x); ring.setAttribute("cy", y); ring.setAttribute("r", 9);
+      gMark.append(halo, ring);
+    }
+  }
+
+  // ---------- game state ----------
+  let state = { phase: "setup", players: [], rounds: 5, turn: 0, current: null, hintsShown: 0, deck: [], last: null };
+
+  function shuffle(a) {
+    for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
+    return a;
+  }
+  const totalTurns = () => state.players.length * state.rounds;
+  const currentPlayer = () => state.players[state.turn % state.players.length];
+
+  function startGame(names, rounds) {
+    state = {
+      phase: "guess", rounds, turn: 0, hintsShown: 0, last: null,
+      players: names.map(name => ({ name, score: 0, hints: 0 })),
+      deck: shuffle(countries.slice()),
+      current: null,
+    };
+    $("setup").hidden = true;
+    $("results").hidden = true;
+    nextCountry();
+  }
+
+  function nextCountry() {
+    state.current = state.deck.pop() || (state.deck = shuffle(countries.slice())).pop();
+    state.hintsShown = 0;
+    state.phase = "guess";
+    state.last = null;
+    zoomed = true;
+    highlight(state.current, "target");
+    frameTarget();
+    render();
+    requestAnimationFrame(() => $("guessInput")?.focus({ preventScroll: true }));
+  }
+
+  function submitGuess(text) {
+    if (state.phase !== "guess" || !text.trim()) return;
+    const p = currentPlayer();
+    const ok = matches(state.current, text);
+    p.hints += state.hintsShown;
+    if (ok) p.score += 1;
+    state.last = { ok, guess: text.trim(), player: p.name };
+    state.phase = "reveal";
+    highlight(state.current, "revealed");
+    render();
+    requestAnimationFrame(() => $("nextBtn")?.focus({ preventScroll: true }));
+  }
+
+  function giveUp() {
+    if (state.phase !== "guess") return;
+    const p = currentPlayer();
+    p.hints += state.hintsShown;
+    state.last = { ok: false, guess: "", player: p.name };
+    state.phase = "reveal";
+    highlight(state.current, "revealed");
+    render();
+    requestAnimationFrame(() => $("nextBtn")?.focus({ preventScroll: true }));
+  }
+
+  function advance() {
+    state.turn += 1;
+    if (state.turn >= totalTurns()) return finish();
+    nextCountry();
+  }
+
+  function ranking() {
+    return state.players.slice().sort((a, b) => b.score - a.score || a.hints - b.hints);
+  }
+
+  function finish() {
+    state.phase = "done";
+    state.current = null;
+    highlight(null);
+    flyTo(world());
+    render();
+    const r = ranking();
+    const top = r.filter(p => p.score === r[0].score && p.hints === r[0].hints);
+    $("winnerTitle").innerHTML = r.length === 1
+      ? `Угадано <span>${r[0].score} из ${state.rounds}</span>`
+      : top.length > 1 ? `<span>Ничья!</span>` : `Победил(а) <span>${esc(r[0].name)}</span>`;
+    $("standings").replaceChildren(...r.map((p, i) => {
+      const li = document.createElement("li");
+      li.innerHTML = `<span class="place">${i + 1}</span>
+        <span>${esc(p.name)}<small>подсказок: ${p.hints}</small></span>
+        <span class="pts">${p.score}</span>`;
+      return li;
+    }));
+    $("results").hidden = false;
+    $("again").focus();
+  }
+
+  const esc = s => s.replace(/[&<>"']/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
+
+  // ---------- rendering ----------
+  function renderScores() {
+    const active = state.phase === "guess" || state.phase === "reveal" ? state.turn % state.players.length : -1;
+    $("scores").replaceChildren(...state.players.map((p, i) => {
+      const chip = document.createElement("span");
+      chip.className = "chip" + (i === active ? " active" : "");
+      chip.innerHTML = `${esc(p.name)} <b>${p.score}</b>`;
+      chip.title = `Угадано стран: ${p.score}, подсказок взято: ${p.hints}`;
+      return chip;
+    }));
+    const n = state.players.length;
+    $("round").textContent = state.players.length && state.phase !== "done"
+      ? `Круг ${Math.floor(state.turn / n) + 1} из ${state.rounds}` : "";
+  }
+
+  function renderHints() {
+    const list = hintsFor(state.current).slice(0, state.hintsShown).map((h, i) => `
+      <div class="hint"><span class="n">${i + 1}</span><p><small>${h.label}</small>${esc(h.text)}</p></div>`).join("");
+    return `<div class="hints">${list}</div>`;
+  }
+
+  function render() {
+    renderScores();
+    const panel = $("panel");
+    if (state.phase === "setup" || state.phase === "done" || !state.current) { panel.innerHTML = ""; return; }
+    const p = currentPlayer();
+    const c = state.current;
+
+    if (state.phase === "guess") {
+      const left = 3 - state.hintsShown;
+      panel.innerHTML = `
+        <div><p class="eyebrow">Ходит</p><p class="turn-name">${esc(p.name)}</p></div>
+        <form class="guess" id="guessForm" autocomplete="off">
+          <input id="guessInput" list="countryNames" placeholder="Какая это страна?" aria-label="Название страны" enterkeyhint="done">
+          <button class="btn" type="submit">Ответить</button>
+        </form>
+        ${renderHints()}
+        <div class="hint-row">
+          ${left > 0 ? `<button class="hint-btn" type="button" id="hintBtn">Подсказка ${state.hintsShown + 1} из 3</button>` : ""}
+          <button class="btn ghost" type="button" id="giveUp">Не знаю</button>
+        </div>`;
+      $("guessForm").onsubmit = e => { e.preventDefault(); submitGuess($("guessInput").value); };
+      $("giveUp").onclick = giveUp;
+      if ($("hintBtn")) $("hintBtn").onclick = () => {
+        const draft = $("guessInput").value;
+        state.hintsShown += 1;
+        render();
+        $("guessInput").value = draft;
+        $("guessInput").focus({ preventScroll: true });
+      };
+      return;
+    }
+
+    // reveal
+    const { ok, guess } = state.last;
+    const isLast = state.turn + 1 >= totalTurns();
+    const nextName = state.players[(state.turn + 1) % state.players.length].name;
+    panel.innerHTML = `
+      <div class="verdict ${ok ? "good" : "bad"}">
+        <span class="head">${ok ? "Верно!" : guess ? "Не угадал(а)" : "Пропуск"}</span>
+        <p>Это <b>${esc(c.name)}</b>, столица — ${esc(c.capital)}.${!ok && guess ? ` Ответ был: «${esc(guess)}».` : ""}</p>
+      </div>
+      ${renderHints()}
+      <button class="btn" type="button" id="nextBtn">${isLast ? "Итоги игры" : state.players.length > 1 ? `Ходит ${esc(nextName)}` : "Следующая страна"}</button>`;
+    $("nextBtn").onclick = advance;
+  }
+
+  // ---------- setup screen ----------
+  const store = {
+    get() { try { return JSON.parse(localStorage.getItem("geoQuizSetup")) || null; } catch { return null; } },
+    set(v) { try { localStorage.setItem("geoQuizSetup", JSON.stringify(v)); } catch {} },
+  };
+  let setupNames = ["Игрок 1", "Игрок 2"];
+  let setupRounds = 5;
+
+  function renderSetup() {
+    const box = $("players");
+    box.replaceChildren(...setupNames.map((name, i) => {
+      const row = document.createElement("div");
+      row.className = "player-row";
+      row.innerHTML = `<input id="player-${i}" maxlength="20" aria-label="Имя игрока ${i + 1}">
+        ${setupNames.length > 1 ? `<button type="button" class="icon-btn" aria-label="Убрать игрока">×</button>` : ""}`;
+      const input = row.querySelector("input");
+      input.value = name;
+      input.oninput = () => { setupNames[i] = input.value; };
+      const rm = row.querySelector("button");
+      if (rm) rm.onclick = () => { setupNames.splice(i, 1); renderSetup(); };
+      return row;
+    }));
+    $("addPlayer").hidden = setupNames.length >= 6;
+    for (const b of $("rounds").children) b.setAttribute("aria-pressed", String(+b.dataset.v === setupRounds));
+  }
+  $("addPlayer").onclick = () => {
+    setupNames.push(`Игрок ${setupNames.length + 1}`);
+    renderSetup();
+    $(`player-${setupNames.length - 1}`).select();
+  };
+  $("rounds").onclick = e => { const v = e.target.closest("button")?.dataset.v; if (v) { setupRounds = +v; renderSetup(); } };
+  $("setupForm").onsubmit = e => {
+    e.preventDefault();
+    const names = setupNames.map((n, i) => n.trim() || `Игрок ${i + 1}`);
+    store.set({ names, rounds: setupRounds });
+    startGame(names, setupRounds);
+  };
+  $("again").onclick = showSetup;
+
+  function showSetup() {
+    const saved = store.get();
+    if (saved?.names?.length) { setupNames = saved.names.slice(0, 6); setupRounds = saved.rounds || 5; }
+    $("results").hidden = true;
+    $("setup").hidden = false;
+    renderSetup();
+    // Show a sample highlighted country behind the setup card so the first frame isn't empty.
+    const sample = countries.find(c => c.id === "250");
+    state.current = sample; highlight(sample, "target"); setView(world());
+    state.current = null;
+    renderScores();
+  }
+
+  // Keep a game in progress across live updates of the page.
+  window.claude?.hot?.snapshot?.(() => ({ state: { ...state, current: state.current?.id, deck: state.deck.map(c => c.id) } }));
+  const boot = data => {
+    const s = data?.state;
+    if (s && s.phase !== "setup" && s.players?.length) {
+      const byId = new Map(countries.map(c => [c.id, c]));
+      state = { ...s, current: byId.get(s.current) || null, deck: s.deck.map(id => byId.get(id)).filter(Boolean) };
+      if (state.phase === "done" || !state.current) return finish();
+      highlight(state.current, state.phase === "reveal" ? "revealed" : "target");
+      setView(fitToBox(boxOf(state.current), 3.2));
+      render();
+      return;
+    }
+    showSetup();
+  };
+  window.claude?.hot?.ready ? window.claude.hot.ready(boot) : boot(window.claude?.hot?.data ?? {});
+})();
+</script>
+</body>
+</html>
