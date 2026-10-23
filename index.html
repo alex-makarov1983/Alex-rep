@@ -105,7 +105,7 @@
   let score = 0, distance = 0, speed = START_SPEED;
   let py = GROUND_Y, vy = 0, onGround = true;
   let crank = 0, wheelRot = 0, hairSwing = 0;
-  let obstacles = [], stars = [], particles = [];
+  let obstacles = [], stars = [], particles = [], bubbles = [];
   let nextSpawn = 0, bonus = 0;
   let overAt = 0, flash = 0, milestone = 0;
   let clouds = [], hills1 = 0, hills2 = 0, groundOff = 0;
@@ -115,7 +115,7 @@
   function reset() {
     score = 0; distance = 0; speed = START_SPEED;
     py = GROUND_Y; vy = 0; onGround = true;
-    obstacles = []; stars = []; particles = [];
+    obstacles = []; stars = []; particles = []; bubbles = [];
     nextSpawn = 380; milestone = 0; bonus = 0;
   }
 
@@ -151,13 +151,15 @@
     puddle: { w: 46, h: 8 },
     cones2: { w: 46, h: 30 },
     hedge: { w: 40, h: 36 },
+    mom: { w: 32, h: 64 },
   };
 
   function spawn() {
     let pool = TYPES.slice(0, 4);
     if (score > 150) pool.push('cones2');
     if (score > 300) pool.push('hedge');
-    const type = pool[Math.floor(Math.random() * pool.length)];
+    let type = pool[Math.floor(Math.random() * pool.length)];
+    if (score > 40 && Math.random() < 0.18) type = 'mom';
     const s = SIZES[type];
     obstacles.push({ type, x: viewW + 40, w: s.w, h: s.h, passed: false });
     if (Math.random() < 0.35) {
@@ -190,6 +192,8 @@
     for (const p of particles) { p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 300 * dt; p.life -= dt; }
     particles = particles.filter(p => p.life > 0);
     if (flash > 0) flash -= dt;
+    for (const b of bubbles) b.life -= dt;
+    bubbles = bubbles.filter(b => b.life > 0);
 
     if (state !== 'running') return;
 
@@ -217,7 +221,16 @@
     nextSpawn -= speed * dt;
     if (nextSpawn <= 0) spawn();
 
-    for (const o of obstacles) o.x -= speed * dt;
+    for (const o of obstacles) {
+      o.x -= speed * dt;
+      // mom Vika cheers once Diana has cleared her
+      if (o.type === 'mom' && !o.passed && o.x + o.w < PLAYER_X - 28) {
+        o.passed = true;
+        bonus += 20;
+        bubbles.push({ o, text: 'Дианка, молодец!', life: 1.8, max: 1.8 });
+        [660, 880, 1100].forEach((f, i) => setTimeout(() => beep(f, 0.12, 'triangle', 0.06), i * 90));
+      }
+    }
     obstacles = obstacles.filter(o => o.x + o.w > -20);
     for (const s of stars) { s.x -= speed * dt; s.t += dt; }
     stars = stars.filter(s => s.x > -20 && !s.got);
@@ -230,7 +243,7 @@
     for (const o of obstacles) {
       const ob = { l: o.x + 4, r: o.x + o.w - 4, t: GROUND_Y - o.h + 3, b: GROUND_Y };
       if (o.type === 'puddle') { ob.t = GROUND_Y - 4; }
-      if (boxes.some(b => b.l < ob.r && b.r > ob.l && b.t < ob.b && b.b > ob.t)) { crash(); return; }
+      if (boxes.some(b => b.l < ob.r && b.r > ob.l && b.t < ob.b && b.b > ob.t)) { crash(o); return; }
     }
     for (const s of stars) {
       if (Math.abs(s.x - PLAYER_X) < 26 && Math.abs(s.y - (py - 45)) < 38) {
@@ -243,8 +256,9 @@
       }
     }
   }
-  function crash() {
+  function crash(o) {
     state = 'over';
+    if (o && o.type === 'mom') bubbles.push({ o, text: 'Ой, осторожнее!', life: 2.5, max: 2.5 });
     overAt = performance.now();
     beep(220, 0.35, 'sawtooth', 0.06, 0.4);
     if (score > best) { best = score; saveBest(best); }
@@ -370,6 +384,43 @@
         ctx.beginPath(); ctx.ellipse(x + 16, gy + 3, 8, 1.6, 0, 0, Math.PI * 2); ctx.fill();
         break;
       }
+      case 'mom': {
+        // Vika faces left, towards Diana, and waves both arms
+        const wave = Math.sin(hairSwing * 1.6) * 4;
+        const cx = x + 16;
+        ctx.translate(cx, gy); ctx.scale(1.3, 1.3); ctx.translate(-cx, -gy);
+        ctx.lineCap = 'round';
+        // legs
+        ctx.strokeStyle = '#3a3366'; ctx.lineWidth = 4;
+        line(cx - 4, gy - 18, cx - 5, gy - 2);
+        line(cx + 4, gy - 18, cx + 5, gy - 2);
+        ctx.fillStyle = '#2b2350';
+        ctx.fillRect(cx - 9, gy - 3, 6, 3);
+        ctx.fillRect(cx + 2, gy - 3, 6, 3);
+        // long hair behind
+        ctx.fillStyle = '#9a6332';
+        ctx.beginPath(); ctx.ellipse(cx + 1, gy - 41, 8, 11, 0, 0, Math.PI * 2); ctx.fill();
+        // arms
+        ctx.strokeStyle = '#f2c3a4'; ctx.lineWidth = 3.5;
+        line(cx - 5, gy - 36, cx - 13, gy - 47 + wave);
+        line(cx + 5, gy - 36, cx + 13, gy - 47 - wave);
+        // dress
+        ctx.fillStyle = '#1fa59a';
+        ctx.beginPath();
+        ctx.moveTo(cx - 6, gy - 38); ctx.lineTo(cx + 6, gy - 38);
+        ctx.lineTo(cx + 11, gy - 15); ctx.lineTo(cx - 11, gy - 15);
+        ctx.closePath(); ctx.fill();
+        ctx.fillStyle = '#ffd23f';
+        ctx.fillRect(cx - 7, gy - 29, 14, 2.5);
+        // head
+        circle(cx - 1, gy - 44, 6.5, '#f7d2b8');
+        ctx.fillStyle = '#9a6332';
+        ctx.beginPath(); ctx.arc(cx - 1, gy - 45, 7, Math.PI * 1.05, Math.PI * 1.9); ctx.closePath(); ctx.fill();
+        circle(cx - 4, gy - 44, 1.2, '#2b2350');
+        ctx.strokeStyle = '#c2456c'; ctx.lineWidth = 1.2;
+        ctx.beginPath(); ctx.arc(cx - 3.5, gy - 41.5, 2, 0.3, Math.PI - 0.3); ctx.stroke();
+        break;
+      }
       case 'hedge': {
         ctx.fillStyle = '#3f9a52';
         ctx.beginPath();
@@ -403,6 +454,49 @@
       ctx.lineTo(Math.cos(a) * r, Math.sin(a) * r);
     }
     ctx.closePath(); ctx.fill(); ctx.stroke();
+    ctx.restore();
+  }
+
+  // comic speech bubble; its tail points at mom's head even once she has left the screen
+  function drawBubble(b) {
+    const o = b.o;
+    const headX = o.x + 15, headY = offY + GROUND_Y - 68;
+    const age = b.max - b.life;
+    const pop = Math.min(1, age / 0.15);
+    const s = (pop < 1 ? 0.6 + 0.5 * pop : 1 + Math.sin(age * 10) * 0.02) * Math.min(1, b.life / 0.2);
+    ctx.save();
+    ctx.font = `20px ${FONT_DISPLAY}`;
+    const tw = ctx.measureText(b.text).width;
+    const w = tw + 32, h = 44;
+    const cx = Math.min(viewW - w / 2 - 12, Math.max(headX + 20, w / 2 + 12));
+    const cy = offY + GROUND_Y - 132;
+    ctx.translate(cx, cy);
+    ctx.scale(s, s);
+    ctx.fillStyle = '#ffffff';
+    ctx.strokeStyle = '#2b2350';
+    ctx.lineWidth = 3;
+    ctx.lineJoin = 'round';
+    // tail
+    const tx = Math.max(-w / 2 + 14, Math.min(w / 2 - 30, headX - cx));
+    ctx.beginPath();
+    ctx.moveTo(tx, h / 2 - 2);
+    ctx.lineTo(headX - cx + 2, headY - cy - 4);
+    ctx.lineTo(tx + 18, h / 2 - 2);
+    ctx.closePath();
+    ctx.fill(); ctx.stroke();
+    // body
+    ctx.beginPath();
+    ctx.ellipse(0, 0, w / 2, h / 2, 0, 0, Math.PI * 2);
+    ctx.fill(); ctx.stroke();
+    // cover the tail seam
+    ctx.beginPath();
+    ctx.moveTo(tx + 2, h / 2 - 5); ctx.lineTo(tx + 16, h / 2 - 5);
+    ctx.lineWidth = 5; ctx.strokeStyle = '#ffffff'; ctx.stroke();
+    ctx.restore();
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.scale(s, s);
+    text(b.text, 0, 1, 20, '#ff4f8b');
     ctx.restore();
   }
 
@@ -608,6 +702,7 @@
       circle(p.x, offY + p.y, p.r, p.c);
     }
     ctx.globalAlpha = 1;
+    for (const b of bubbles) drawBubble(b);
     drawHUD();
   }
 
