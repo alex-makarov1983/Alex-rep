@@ -43,7 +43,8 @@
   header a { margin-left: auto; color: var(--ink-dim); font-size: 14px; }
 
   main { max-width: 760px; margin: 0 auto; padding: 0 16px; }
-  section.tab { display: grid; gap: 14px; }
+  section.tab { display: grid; gap: 14px; grid-template-columns: minmax(0, 1fr); }
+  #result, #typeCards { display: grid; gap: 14px; grid-template-columns: minmax(0, 1fr); }
   .card { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 16px; min-width: 0; }
   .card h2 { margin: 0 0 10px; font: 20px/1.2 var(--font-display); }
   .card h3 { margin: 16px 0 8px; font-size: 16px; }
@@ -119,6 +120,24 @@
   .hist-item small { color: var(--ink-dim); display: block; }
   .icon-btn { border: 0; background: transparent; color: var(--ink-dim); font-size: 18px; cursor: pointer; padding: 8px; }
 
+  .field { display: block; }
+  .field input, .field select {
+    width: 100%; padding: 11px 12px; border-radius: 10px; border: 1px solid var(--line);
+    background: var(--panel-2); color: var(--ink); font-size: 16px;
+  }
+  .check { display: flex; gap: 10px; align-items: center; margin-top: 12px; font-size: 15px; cursor: pointer; }
+  .check input { width: 20px; height: 20px; accent-color: var(--ball); }
+  .frames { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin: 8px 0; }
+  .frames figure { margin: 0; }
+  .frames img { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 8px; background: #000; display: block; }
+  .frames figcaption { font-size: 12px; color: var(--ink-dim); text-align: center; margin-top: 3px; }
+  .prio { padding: 12px; border-radius: 12px; background: var(--panel-2); margin-top: 10px; }
+  .prio b { display: block; margin-bottom: 4px; }
+  .prio p { font-size: 14px; margin: 0 0 6px; }
+  .pro { font-size: 14px; color: var(--ink-dim); }
+  .pro::before { content: "🏆 "; }
+  .shot { border-top: 1px solid var(--line); padding-top: 12px; margin-top: 12px; }
+  .badge { display: inline-block; font-size: 12px; font-weight: 800; padding: 2px 8px; border-radius: 999px; background: var(--ball); color: var(--ball-ink); vertical-align: middle; margin-left: 6px; }
   .error { color: var(--bad); }
   .empty { text-align: center; padding: 26px 16px; }
 
@@ -127,7 +146,7 @@
     background: var(--panel); border-top: 1px solid var(--line); padding: 6px 8px calc(6px + env(safe-area-inset-bottom, 0px));
   }
   nav.tabs div { display: flex; gap: 6px; width: 100%; max-width: 760px; }
-  nav.tabs button { flex: 1; border: 0; background: transparent; color: var(--ink-dim); padding: 8px 4px; border-radius: 10px; font-size: 13px; font-weight: 700; cursor: pointer; display: grid; gap: 2px; justify-items: center; }
+  nav.tabs button { flex: 1; border: 0; background: transparent; color: var(--ink-dim); padding: 8px 2px; border-radius: 10px; font-size: 12px; font-weight: 700; cursor: pointer; display: grid; gap: 2px; justify-items: center; }
   nav.tabs button span { font-size: 20px; line-height: 1; }
   nav.tabs button[aria-selected="true"] { color: var(--ball); background: var(--panel-2); }
 </style>
@@ -144,21 +163,11 @@
   <section class="tab" id="tab-analyze">
     <div class="card" id="uploadCard">
       <h2>Новый разбор</h2>
-      <div class="row">
-        <div>
-          <p class="field-label">Что на видео</p>
-          <div class="seg" id="modeSeg">
-            <button type="button" data-v="ground" aria-pressed="true">Удары с отскока</button>
-            <button type="button" data-v="serve" aria-pressed="false">Подача</button>
-          </div>
-        </div>
-        <div>
-          <p class="field-label">Ведущая рука</p>
-          <div class="seg" id="handSeg">
-            <button type="button" data-v="right" aria-pressed="true">Правша</button>
-            <button type="button" data-v="left" aria-pressed="false">Левша</button>
-          </div>
-        </div>
+      <p class="dim" id="whoLine" style="font-size:14px"></p>
+      <p class="field-label">Что на видео</p>
+      <div class="seg" id="modeSeg">
+        <button type="button" data-v="ground" aria-pressed="true">Игра и удары с отскока</button>
+        <button type="button" data-v="serve" aria-pressed="false">Подача</button>
       </div>
       <div class="upload">
         <button class="btn" type="button" tabindex="-1">Загрузить видео</button>
@@ -167,7 +176,7 @@
       <details>
         <summary>Как снять видео для точного разбора</summary>
         <ul class="tips">
-          <li>Камера сбоку от игрока, на уровне пояса, на штативе или у сетки ограждения.</li>
+          <li>Лучше всего камера сбоку от игрока, на уровне пояса. Сзади тоже можно, но ставьте камеру ближе и выше, чтобы игрок занимал хотя бы треть высоты кадра.</li>
           <li>Игрок виден целиком, с головы до ног, во всех ударах.</li>
           <li>10–40 секунд, 5–10 ударов одного типа. Для подачи — 3–6 подач.</li>
           <li>Хороший свет; 60 кадров/с, если телефон умеет.</li>
@@ -192,7 +201,8 @@
         <p class="dim" style="font-size:13px;margin:6px 0 0">Нажмите на удар, чтобы перейти к моменту контакта. Скелет показывает, как приложение видит позу.</p>
       </div>
       <div class="card" id="summaryCard"></div>
-      <div id="typeCards" style="display:grid;gap:14px"></div>
+      <div class="card" id="aiCard"></div>
+      <div id="typeCards"></div>
       <div class="card" id="drillsCard"></div>
     </div>
   </section>
@@ -202,6 +212,33 @@
 
   <!-- Тренировка -->
   <section class="tab" id="tab-plan" hidden></section>
+
+  <!-- Профиль -->
+  <section class="tab" id="tab-profile" hidden>
+    <div class="card">
+      <h2>Игрок</h2>
+      <label class="field"><span class="field-label">Имя</span><input id="pName" type="text" autocomplete="off"></label>
+      <div class="row" style="margin-top:12px">
+        <label class="field"><span class="field-label">Уровень (NTRP)</span>
+          <select id="pLevel"><option>1.0–1.5</option><option>1.5–2.5</option><option>3.0</option><option>3.5</option><option>4.0</option><option>4.5+</option></select></label>
+        <label class="field"><span class="field-label">Бэкхенд</span>
+          <select id="pBackhand"><option value="two">Двумя руками</option><option value="one">Одной рукой</option></select></label>
+      </div>
+      <p class="field-label" style="margin-top:12px">Ведущая рука</p>
+      <div class="seg" id="handSeg">
+        <button type="button" data-v="right" aria-pressed="true">Правша</button>
+        <button type="button" data-v="left" aria-pressed="false">Левша</button>
+      </div>
+      <label class="field" style="margin-top:12px"><span class="field-label">Цель (по желанию)</span><input id="pGoal" type="text" placeholder="Например: стабильно перекидывать 10 мячей подряд" autocomplete="off"></label>
+    </div>
+    <div class="card">
+      <h2>Глубокий разбор ИИ</h2>
+      <p class="dim" style="font-size:14px">Глубокий разбор делает Claude: он смотрит на кадры каждого удара (замах, контакт, завершение), определяет тип удара и хват, сравнивает с профессионалами и подбирает упражнения. Для этого нужен ключ API Anthropic (console.anthropic.com). Один разбор стоит примерно 5–15 центов.</p>
+      <label class="field"><span class="field-label">Ключ API</span><input id="pKey" type="password" placeholder="sk-ant-…" autocomplete="off" spellcheck="false"></label>
+      <label class="check"><input type="checkbox" id="pAuto"> Делать глубокий разбор сразу после загрузки</label>
+      <p class="dim" style="font-size:13px;margin-top:8px">Ключ хранится только в этом браузере и отправляется только в Anthropic. Кадры видео уходят в Anthropic лишь тогда, когда вы запускаете глубокий разбор.</p>
+    </div>
+  </section>
 </main>
 
 <nav class="tabs" aria-label="Разделы">
@@ -209,11 +246,13 @@
     <button role="tab" aria-selected="true" data-tab="analyze"><span>🎾</span>Разбор</button>
     <button role="tab" aria-selected="false" data-tab="progress"><span>📈</span>Прогресс</button>
     <button role="tab" aria-selected="false" data-tab="plan"><span>🤝</span>Тренировка</button>
+    <button role="tab" aria-selected="false" data-tab="profile"><span>👤</span>Профиль</button>
   </div>
 </nav>
 
 <script src="knowledge.js"></script>
 <script src="analysis.js"></script>
+<script src="ai.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

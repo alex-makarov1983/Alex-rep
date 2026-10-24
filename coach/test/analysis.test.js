@@ -52,3 +52,24 @@ test("scoreValue: 100 в диапазоне и 0 за допуском", () => {
   assert.equal(A.scoreValue(12, [0, 10], 4), 50);
   assert.equal(A.scoreValue(20, [0, 10], 4), 0);
 });
+
+test("сбой модели (скачок на другого человека) не считается ударом", () => {
+  const frames = forehandClip(true);
+  // В двух кадрах между ударами модель «перепрыгнула» на человека в другом углу кадра.
+  for (const i of [37, 38]) frames[i] = { t: frames[i].t, ...pose({ shift: 900, drop: 0, knee: 0, stance: 160, wx: 1400, wy: 100, elbowBend: 0, yaw: 0, headDx: 0 }) };
+  const r = A.analyze(frames, { mode: "ground", hand: "right" });
+  assert.equal(r.strokes.length, 3);
+});
+
+test("съёмка сзади: точка удара не оценивается, уровень помечен как ненадёжный", () => {
+  // Широкие плечи в кадре — признак съёмки сзади.
+  const frames = forehandClip(true).map((f) => {
+    const p = f.p.map((q) => q.slice());
+    p[11][0] -= 60; p[12][0] += 60;
+    return { ...f, p };
+  });
+  const r = A.analyze(frames, { mode: "ground", hand: "right" });
+  assert.equal(r.view, "back");
+  assert.equal(r.reliable, false);
+  assert.ok(!r.types.forehand.metrics.contactFront);
+});

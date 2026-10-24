@@ -1,6 +1,7 @@
 // Разбор ударов по последовательности поз (33 точки MediaPipe Pose).
 // Кадр: { t: секунды, p: [[x, y, visibility] × 33] в пикселях, w: [[x, y, z] × 33] в метрах или null }.
-// Камеру лучше ставить сбоку от игрока на уровне пояса: так точнее всего видна точка удара.
+// Лучше всего снимать сбоку на уровне пояса. Съёмка сзади (или спереди) тоже поддерживается:
+// тогда углы суставов и точка удара считаются по 3D-координатам модели, а не по плоской картинке.
 (function (root) {
   "use strict";
 
@@ -31,6 +32,29 @@
     if (!n) return null;
     return Math.acos(Math.max(-1, Math.min(1, (v1[0] * v2[0] + v1[1] * v2[1]) / n))) * 180 / Math.PI;
   }
+  // Угол в суставе по 3D-точкам модели (в метрах): не зависит от ракурса, но шумнее плоского.
+  function angle3(f, a, b, c) {
+    if (!f || !f.w || !pt(f, a) || !pt(f, b) || !pt(f, c)) return null;
+    const A = f.w[a], B = f.w[b], C = f.w[c];
+    const v1 = [A[0] - B[0], A[1] - B[1], A[2] - B[2]], v2 = [C[0] - B[0], C[1] - B[1], C[2] - B[2]];
+    const n = Math.hypot(...v1) * Math.hypot(...v2);
+    if (!n) return null;
+    return Math.acos(Math.max(-1, Math.min(1, (v1[0] * v2[0] + v1[1] * v2[1] + v1[2] * v2[2]) / n))) * 180 / Math.PI;
+  }
+  // Сбоку углы видны в плоскости кадра; сзади сгибание колена и локтя уходит в глубину.
+  function jointAngle(f, a, b, c, view) {
+    return view === "back" ? angle3(f, a, b, c) : angle(pt(f, a), pt(f, b), pt(f, c));
+  }
+
+  // Ракурс: сбоку плечи в кадре узкие относительно корпуса, сзади или спереди — широкие.
+  function detectView(frames) {
+    const r = median(frames.map((f) => {
+      const a = pt(f, L.lSh), b = pt(f, L.rSh), tr = torso(f);
+      return a && b && tr ? Math.abs(a[0] - b[0]) / tr : null;
+    }));
+    return r != null && r > 0.5 ? "back" : "side";
+  }
+
   function torso(f) {
     const s = mid(pt(f, L.lSh), pt(f, L.rSh)), h = mid(pt(f, L.lHip), pt(f, L.rHip));
     return s && h ? dist(s, h) : null;
@@ -59,19 +83,41 @@
     return Math.round(Math.max(0, 100 * (1 - d / tol)));
   }
 
-  // Поиск ударов: пики скорости ударной кисти, измеренной в длинах корпуса в секунду.
+  // Сбои модели: корпус вдруг вдвое больше или меньше обычного, или игрок «прыгает» за кадр
+  // через полкорта (модель переключилась на другого человека). Такие кадры выбрасываем.
+  function cleanFrames(frames) {
+    const M = median(frames.map(torso));
+    if (!M) return frames;
+    let prev = null;
+    return frames.map((f) => {
+      const tr = torso(f), h = hipC(f);
+      let ok = tr != null && h && tr > 0.6 * M && tr < 1.6 * M;
+      if (ok && prev && dist(h, prev.h) / M > Math.max(1, (f.t - prev.t) * 15)) ok = false;
+      if (!ok) return { t: f.t, p: null, w: null };
+      prev = { h, t: f.t };
+      return f;
+    });
+  }
+
+  // Поиск ударов: пики скорости кистей, измеренной в длинах корпуса в секунду.
+  // Берём быструю из двух кистей: при съёмке сзади ударная кисть часто закрыта телом,
+  // а в двуручном бэкхенде работают обе.
   function detectStrokes(frames, hand, mode) {
     const s = side(hand);
     const scale = median(frames.map(torso)) || 1;
+    const wrists = mode === "serve" ? [s.wr] : [s.wr, s.offWr];
     const speed = frames.map((f, i) => {
       if (!i) return 0;
-      const a = pt(frames[i - 1], s.wr), b = pt(f, s.wr), dt = f.t - frames[i - 1].t;
-      return a && b && dt > 0 ? dist(a, b) / dt / scale : 0;
+      const prev = frames[i - 1], dt = f.t - prev.t;
+      if (!f.p || !prev.p || dt <= 0) return 0;
+      const v = Math.max(...wrists.map((j) => dist(f.p[j], prev.p[j]) / dt / scale));
+      return v > 50 ? 0 : v; // быстрее 50 корпусов в секунду рука не двигается — это сбой
     });
     const sm = speed.map((_, i) => (speed[Math.max(0, i - 1)] + speed[i] + speed[Math.min(speed.length - 1, i + 1)]) / 3);
-    const top = Math.max(0, ...sm);
-    const thr = Math.max(2.5, top * 0.45);
-    const gap = mode === "serve" ? 2.0 : 0.9;
+    const moving = sm.filter((x) => x > 0).sort((a, b) => a - b);
+    const top = moving.length ? moving[Math.floor(moving.length * 0.97)] : 0;
+    const thr = Math.max(3, top * 0.45);
+    const gap = mode === "serve" ? 2.0 : 1.2;
     const peaks = [];
     for (let i = 1; i < sm.length - 1; i++) {
       if (sm[i] < thr || sm[i] < sm[i - 1] || sm[i] < sm[i + 1]) continue;
@@ -126,7 +172,10 @@
         while (d < -180) d += 360;
         u.push(u[i - 1] + d);
       }
-      return Math.max(...u) - Math.min(...u);
+      // Крайние 10% отбрасываем: 3D-оценка поворота шумит, а больше 180° корпус не крутится.
+      const sorted = u.slice().sort((a, b) => a - b);
+      const lo = sorted[Math.floor(sorted.length * 0.1)], hi = sorted[Math.ceil(sorted.length * 0.9) - 1];
+      return Math.min(180, hi - lo);
     }
     const ratios = win.map((f) => {
       const a = pt(f, L.lSh), b = pt(f, L.rSh), tr = torso(f);
@@ -137,24 +186,28 @@
     return Math.acos(Math.max(0, Math.min(1, mn / mx))) * 180 / Math.PI;
   }
 
-  function groundstrokeMetrics(frames, t, hand, scale) {
+  function groundstrokeMetrics(frames, t, hand, scale, view) {
     const s = side(hand);
     const c = nearest(frames, t);
     const tr = torso(c) || scale;
     const dir = hitDirection(frames, t, s.wr);
-    const wr = pt(c, s.wr), hip = hipC(c);
+    // Сзади ударная кисть в момент удара часто закрыта телом. Когда модель не уверена в её
+    // положении, точку удара, работу руки и проводку не оцениваем, чтобы не давать ложных советов.
+    const sure = (f) => { const q = f && f.p && f.p[s.wr]; return q && q[2] >= (view === "back" ? 0.65 : MIN_VIS) ? q : null; };
+    const wr = sure(c), hip = hipC(c);
 
     const knees = inWindow(frames, t - 0.7, t + 0.05).map((f) => minOf([
-      angle(pt(f, L.lHip), pt(f, L.lKnee), pt(f, L.lAnk)),
-      angle(pt(f, L.rHip), pt(f, L.rKnee), pt(f, L.rAnk)),
+      jointAngle(f, L.lHip, L.lKnee, L.lAnk, view),
+      jointAngle(f, L.rHip, L.rKnee, L.rAnk, view),
     ]));
 
     const follow = inWindow(frames, t, t + 0.7).map((f) => {
-      const sh = mid(pt(f, L.lSh), pt(f, L.rSh)), w = pt(f, s.wr), tt = torso(f) || scale;
+      const sh = mid(pt(f, L.lSh), pt(f, L.rSh)), w = sure(f), tt = torso(f) || scale;
       return sh && w ? (sh[1] - w[1]) / tt : null;
     });
 
-    const n0 = pt(c, L.nose);
+    // Сзади лица не видно, и положение носа модель угадывает: голову оцениваем только сбоку.
+    const n0 = view === "back" ? null : pt(c, L.nose);
     const head = n0 ? maxOf(inWindow(frames, t - 0.15, t + 0.15).map((f) => {
       const n = pt(f, L.nose);
       return n ? dist(n, n0) / tr : null;
@@ -162,18 +215,30 @@
 
     const la = pt(c, L.lAnk), ra = pt(c, L.rAnk);
 
+    // Точку удара меряем только сбоку: сзади она уходит в глубину кадра, а оценка глубины
+    // по одной камере слишком шумная. Для съёмки сзади её оценивает глубокий разбор по кадрам.
+    const front = view !== "back" && wr && hip ? ((wr[0] - hip[0]) * dir) / tr : null;
+
+    // Ширина стойки: сзади шаг вперёд-назад тоже уходит в глубину, поэтому берём 3D-точки.
+    let base = la && ra ? dist(la, ra) / tr : null;
+    if (view === "back") {
+      const w = c.w;
+      base = w && la && ra ? Math.hypot(w[L.lAnk][0] - w[L.rAnk][0], w[L.lAnk][2] - w[L.rAnk][2]) /
+        (Math.abs((w[L.lHip][1] + w[L.rHip][1]) / 2 - (w[L.lSh][1] + w[L.rSh][1]) / 2) || 0.5) : null;
+    }
+
     return {
       turn: shoulderTurn(frames, t),
       knee: minOf(knees),
-      contactFront: wr && hip ? ((wr[0] - hip[0]) * dir) / tr : null,
-      extension: angle(pt(c, s.sh), pt(c, s.el), wr),
+      contactFront: front,
+      extension: wr ? jointAngle(c, s.sh, s.el, s.wr, view) : null,
       followThrough: maxOf(follow),
       head,
-      base: la && ra ? dist(la, ra) / tr : null,
+      base,
     };
   }
 
-  function serveMetrics(frames, peakT, hand, scale) {
+  function serveMetrics(frames, peakT, hand, scale, view) {
     const s = side(hand);
     // Контакт на подаче — самая высокая точка кисти рядом с пиком скорости.
     let c = nearest(frames, peakT), best = Infinity;
@@ -188,8 +253,8 @@
     let kneeMin = null, kneeT = null;
     for (const f of inWindow(frames, t - 1.3, t - 0.1)) {
       const a = minOf([
-        angle(pt(f, L.lHip), pt(f, L.lKnee), pt(f, L.lAnk)),
-        angle(pt(f, L.rHip), pt(f, L.rKnee), pt(f, L.rAnk)),
+        jointAngle(f, L.lHip, L.lKnee, L.lAnk, view),
+        jointAngle(f, L.rHip, L.rKnee, L.rAnk, view),
       ]);
       if (a != null && (kneeMin == null || a < kneeMin)) { kneeMin = a; kneeT = f.t; }
     }
@@ -216,7 +281,7 @@
       m: {
         trophy: kneeMin,
         contactHeight: nose && wr ? (nose[1] - wr[1]) / tr : null,
-        serveExtension: angle(pt(c, s.sh), pt(c, s.el), wr),
+        serveExtension: jointAngle(c, s.sh, s.el, s.wr, view),
         tossArm: toss,
         legDrive,
         serveFinish: finish,
@@ -250,15 +315,17 @@
     const usable = frames.filter((f) => pt(f, side(hand).wr) && torso(f));
     if (usable.length < 8) return { error: "nopose" };
 
+    frames = cleanFrames(frames);
+    const view = opts.view || detectView(frames);
     const { peaks, scale } = detectStrokes(frames, hand, mode);
     const strokes = [];
     for (const p of peaks.slice(0, 20)) {
       if (mode === "serve") {
-        const r = serveMetrics(frames, p.t, hand, scale);
+        const r = serveMetrics(frames, p.t, hand, scale, view);
         strokes.push({ type: "serve", t: r.t, ...scoreMetrics(r.m) });
       } else {
         const type = classify(frames, p.t, hand);
-        strokes.push({ type, t: p.t, ...scoreMetrics(groundstrokeMetrics(frames, p.t, hand, scale)) });
+        strokes.push({ type, t: p.t, ...scoreMetrics(groundstrokeMetrics(frames, p.t, hand, scale, view)) });
       }
     }
     if (!strokes.length) return { error: "nostrokes" };
@@ -282,10 +349,12 @@
       if (r.score != null) { total += r.score * list.length; n += list.length; }
     }
     const overall = n ? Math.round(total / n) : null;
-    return { strokes, types, overall, level: levelFor(overall || 0) };
+    // Сзади половину элементов не измерить, и оставшиеся завышают общую оценку,
+    // поэтому уровень по позе считаем надёжным только при съёмке сбоку.
+    return { strokes, types, overall, view, reliable: view === "side", level: levelFor(overall || 0) };
   }
 
-  const api = { analyze, scoreValue, levelFor, detectStrokes, angle, LANDMARKS: L };
+  const api = { analyze, scoreValue, levelFor, detectStrokes, detectView, angle, LANDMARKS: L };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.TennisAnalysis = api;
 })(typeof window !== "undefined" ? window : globalThis);
