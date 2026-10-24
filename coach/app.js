@@ -102,12 +102,35 @@
     return landmarkerPromise;
   }
 
-  function seek(video, t) {
+  // Перемотка с подстраховкой: некоторые браузеры иногда не присылают «seeked», и без таймаута
+  // разбор зависал бы навсегда.
+  function seek(video, t, timeoutMs = 3000) {
     return new Promise((resolve) => {
-      const done = () => { video.removeEventListener("seeked", done); resolve(); };
+      let timer = null;
+      const done = () => { clearTimeout(timer); video.removeEventListener("seeked", done); resolve(); };
       video.addEventListener("seeked", done);
+      timer = setTimeout(done, timeoutMs);
       video.currentTime = t;
     });
+  }
+
+  function withTimeout(promise, ms, error) {
+    return Promise.race([promise, new Promise((_, fail) => setTimeout(() => fail(new Error(error)), ms))]);
+  }
+
+  // Safari на iPhone не грузит кадры, пока видео не запущено: ждём метаданные и коротко
+  // запускаем-останавливаем ролик, чтобы декодер отдал первый кадр.
+  async function openVideo(video, file) {
+    if (video.src) URL.revokeObjectURL(video.src);
+    video.muted = true;
+    video.src = URL.createObjectURL(file);
+    await withTimeout(new Promise((ok, fail) => {
+      video.onloadedmetadata = ok;
+      video.onerror = () => fail(new Error("video"));
+    }), 20000, "video");
+    try { await withTimeout(video.play(), 3000, "play"); } catch (e) { /* без автозапуска тоже попробуем */ }
+    video.pause();
+    if (!video.videoWidth) throw new Error("video");
   }
 
   // Если в кадре двое (например, партнёр на другой стороне), следим за тем же игроком, что и
@@ -124,30 +147,88 @@
     return best;
   }
 
-  async function extractFrames(video, onProgress) {
-    const lm = await getLandmarker();
+  // Кадр для модели: уменьшаем до 640 px по большей стороне. Видео с телефона бывает 4K,
+  // а модели хватает и 640, зато так в разы быстрее и меньше памяти.
+  const frameCanvas = document.createElement("canvas");
+  function poseAt(lm, video, t, track) {
     const W = video.videoWidth, H = video.videoHeight;
-    const end = Math.min(video.duration, MAX_SECONDS);
-    const frames = [];
-    let prev = null;
+    const k = Math.min(1, 640 / Math.max(W, H));
+    frameCanvas.width = Math.round(W * k); frameCanvas.height = Math.round(H * k);
+    frameCanvas.getContext("2d").drawImage(video, 0, 0, frameCanvas.width, frameCanvas.height);
+    lastTs += Math.max(1, Math.round(1000 / FPS));
+    const res = lm.detectForVideo(frameCanvas, lastTs);
+    const i = pickPlayer(res, track.prev);
+    if (i < 0) return { t, p: null, w: null };
+    const lmk = res.landmarks[i];
+    track.prev = [(lmk[23].x + lmk[24].x) / 2, (lmk[23].y + lmk[24].y) / 2];
+    return {
+      t,
+      p: lmk.map((q) => [q.x * W, q.y * H, q.visibility == null ? 1 : q.visibility]),
+      w: res.worldLandmarks && res.worldLandmarks[i] ? res.worldLandmarks[i].map((q) => [q.x, q.y, q.z]) : null,
+    };
+  }
+
+  // Основной способ: проигрываем ролик и на каждом нужном кадре ставим паузу, распознаём позу
+  // и продолжаем. Это намного быстрее перемотки: видео с iPhone перематывается медленно.
+  function extractByPlayback(video, lm, end, onProgress) {
+    return new Promise((resolve, reject) => {
+      const frames = [], track = { prev: null };
+      let next = 0, done = false, lastTick = Date.now();
+      const finish = () => {
+        if (done) return;
+        done = true; clearInterval(watchdog); video.pause(); video.playbackRate = 1;
+        resolve(frames);
+      };
+      const onFrame = (now, meta) => {
+        if (done) return;
+        const t = meta.mediaTime;
+        if (t >= end) return finish();
+        if (t + 0.002 >= next) {
+          video.pause();
+          frames.push(poseAt(lm, video, t, track));
+          next = t + 1 / FPS;
+          lastTick = Date.now();
+          onProgress(t / end);
+          video.play().catch(() => {});
+        }
+        video.requestVideoFrameCallback(onFrame);
+      };
+      video.onended = finish;
+      // Если кадры перестали приходить, не висим: отдаём то, что успели, или переходим к перемотке.
+      const watchdog = setInterval(() => {
+        if (Date.now() - lastTick < 8000) return;
+        if (frames.length && frames[frames.length - 1].t > end - 1) return finish();
+        done = true; clearInterval(watchdog); video.pause(); video.playbackRate = 1;
+        reject(new Error("stalled"));
+      }, 1000);
+      video.currentTime = 0;
+      video.playbackRate = 2; // промежутки между нужными кадрами проскакиваем быстрее
+      video.requestVideoFrameCallback(onFrame);
+      video.play().catch(() => { clearInterval(watchdog); done = true; reject(new Error("stalled")); });
+    });
+  }
+
+  // Запасной способ для браузеров без requestVideoFrameCallback: перемотка кадр за кадром.
+  async function extractBySeeking(video, lm, end, onProgress) {
+    const frames = [], track = { prev: null };
     for (let t = 0; t < end; t += 1 / FPS) {
       await seek(video, t);
-      lastTs += Math.max(1, Math.round(1000 / FPS));
-      const res = lm.detectForVideo(video, lastTs);
-      const i = pickPlayer(res, prev);
-      if (i < 0) frames.push({ t, p: null, w: null });
-      else {
-        const lmk = res.landmarks[i];
-        prev = [(lmk[23].x + lmk[24].x) / 2, (lmk[23].y + lmk[24].y) / 2];
-        frames.push({
-          t,
-          p: res.landmarks[i].map((q) => [q.x * W, q.y * H, q.visibility == null ? 1 : q.visibility]),
-          w: res.worldLandmarks && res.worldLandmarks[i] ? res.worldLandmarks[i].map((q) => [q.x, q.y, q.z]) : null,
-        });
-      }
+      frames.push(poseAt(lm, video, t, track));
       onProgress(t / end);
     }
     return frames;
+  }
+
+  async function extractFrames(video, onProgress) {
+    const lm = await getLandmarker();
+    const end = Math.min(video.duration, MAX_SECONDS);
+    if ("requestVideoFrameCallback" in HTMLVideoElement.prototype) {
+      try {
+        const frames = await extractByPlayback(video, lm, end, onProgress);
+        if (frames.length >= end * FPS * 0.5) return frames;
+      } catch (e) { console.warn("playback extraction failed, falling back to seeking", e); }
+    }
+    return extractBySeeking(video, lm, end, onProgress);
   }
 
   // ---------- Разбор ----------
@@ -172,18 +253,16 @@
     $("result").hidden = true;
     setWork("Разбираю видео…", "Загружаю модель распознавания позы", 0.02);
     try {
-      if (video.src) URL.revokeObjectURL(video.src);
-      video.src = URL.createObjectURL(file);
-      await new Promise((ok, fail) => {
-        video.onloadeddata = ok;
-        video.onerror = () => fail(new Error("video"));
-      });
-      try { await getLandmarker(); } catch (e) { throw new Error("model"); }
-      const frames = await extractFrames(video, (f) => setWork("Разбираю видео…", "Распознаю движения: " + Math.round(f * 100) + "%", 0.05 + f * 0.9));
+      await openVideo(video, file);
+      setWork("Разбираю видео…", "Загружаю модель распознавания позы (≈10 МБ, только в первый раз)", 0.03);
+      try { await withTimeout(getLandmarker(), 90000, "model"); } catch (e) { throw new Error("model"); }
+      const t0 = Date.now();
+      const frames = await extractFrames(video, (f) => setWork("Разбираю видео…",
+        `Распознаю движения: ${Math.round(f * 100)}% · ${Math.round((Date.now() - t0) / 1000)} с`, 0.05 + f * 0.9));
       await showAnalysis(frames);
     } catch (err) {
       console.error(err);
-      const msg = err && err.message === "video" ? "Не получилось открыть это видео. Попробуйте MP4 или MOV."
+      const msg = err && err.message === "video" ? "Не получилось открыть это видео в браузере. Попробуйте другой ролик или снимите заново в обычном режиме (не замедленная съёмка)."
         : err && err.message === "model" ? "Не удалось загрузить модель распознавания. Нужен интернет при первом запуске."
         : "Что-то пошло не так при разборе. Попробуйте ещё раз или другое видео.";
       setWork("Ошибка", msg, 0);

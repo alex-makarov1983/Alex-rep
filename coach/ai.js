@@ -63,8 +63,10 @@
 
   function seek(video, t) {
     return new Promise((resolve) => {
-      const done = () => { video.removeEventListener("seeked", done); resolve(); };
+      let timer = null;
+      const done = () => { clearTimeout(timer); video.removeEventListener("seeked", done); resolve(); };
       video.addEventListener("seeked", done);
+      timer = setTimeout(done, 3000); // без таймаута пропавший «seeked» подвесил бы разбор
       video.currentTime = Math.max(0, Math.min(video.duration - 0.05, t));
     });
   }
