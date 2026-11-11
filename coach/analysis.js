@@ -47,12 +47,15 @@
   }
 
   // Ракурс: сбоку плечи в кадре узкие относительно корпуса, сзади или спереди — широкие.
+  // Во время удара корпус разворачивается боком при любом ракурсе, поэтому смотрим на кадры,
+  // где плечи шире всего (75-й процентиль): сзади игрок между ударами стоит лицом к сетке.
   function detectView(frames) {
-    const r = median(frames.map((f) => {
+    const r = frames.map((f) => {
       const a = pt(f, L.lSh), b = pt(f, L.rSh), tr = torso(f);
       return a && b && tr ? Math.abs(a[0] - b[0]) / tr : null;
-    }));
-    return r != null && r > 0.5 ? "back" : "side";
+    }).filter((x) => x != null).sort((x, y) => x - y);
+    if (!r.length) return "side";
+    return r[Math.floor(r.length * 0.75)] > 0.5 ? "back" : "side";
   }
 
   function torso(f) {
@@ -309,6 +312,7 @@
   }
 
   // Главная функция: кадры → удары → метрики по каждому типу удара → общая оценка и уровень.
+  // opts.hitTimes — готовые моменты ударов (например, из нарезки по звуку); тогда удары не ищем.
   function analyze(frames, opts) {
     const hand = opts.hand || "right";
     const mode = opts.mode === "serve" ? "serve" : "ground";
@@ -318,8 +322,9 @@
     frames = cleanFrames(frames);
     const view = opts.view || detectView(frames);
     const { peaks, scale } = detectStrokes(frames, hand, mode);
+    const times = opts.hitTimes ? opts.hitTimes.map((t) => ({ t })) : peaks.slice(0, 20);
     const strokes = [];
-    for (const p of peaks.slice(0, 20)) {
+    for (const p of times) {
       if (mode === "serve") {
         const r = serveMetrics(frames, p.t, hand, scale, view);
         strokes.push({ type: "serve", t: r.t, ...scoreMetrics(r.m) });
@@ -329,8 +334,12 @@
       }
     }
     if (!strokes.length) return { error: "nostrokes" };
+    return summarize(strokes, view);
+  }
 
-    // По каждому типу удара берём медиану значений: один неудачный удар не портит картину.
+  // Сводка по ударам (в том числе собранным из нескольких видео): по каждому типу удара
+  // берём медиану значений, чтобы один неудачный удар не портил картину.
+  function summarize(strokes, view) {
     const byType = {};
     for (const st of strokes) (byType[st.type] = byType[st.type] || []).push(st);
     const types = {};
@@ -354,7 +363,19 @@
     return { strokes, types, overall, view, reliable: view === "side", level: levelFor(overall || 0) };
   }
 
-  const api = { analyze, scoreValue, levelFor, detectStrokes, detectView, angle, LANDMARKS: L };
+  // Ролик из нарезки (cut_strokes.py): в имени записаны длина фрагмента и момент удара,
+  // например «day1_strokes_s2.2_h1.3.mp4» — удары на 1.3 с, 3.5 с, 5.7 с…
+  function gridHits(fileName, duration) {
+    const m = /_s(\d+(?:\.\d+)?)_h(\d+(?:\.\d+)?)/.exec(fileName || "");
+    if (!m) return null;
+    const seg = parseFloat(m[1]), hit = parseFloat(m[2]);
+    if (!(seg > 0) || !(hit >= 0) || hit >= seg) return null;
+    const out = [];
+    for (let t = hit; t < duration - 0.05; t += seg) out.push(Math.round(t * 100) / 100);
+    return out;
+  }
+
+  const api = { analyze, summarize, gridHits, scoreValue, levelFor, detectStrokes, detectView, angle, LANDMARKS: L };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.TennisAnalysis = api;
 })(typeof window !== "undefined" ? window : globalThis);

@@ -169,9 +169,15 @@
         <button type="button" data-v="ground" aria-pressed="true">Игра и удары с отскока</button>
         <button type="button" data-v="serve" aria-pressed="false">Подача</button>
       </div>
+      <p class="field-label" style="margin-top:12px">Откуда снято</p>
+      <div class="seg" id="viewSeg">
+        <button type="button" data-v="auto" aria-pressed="true">Определить</button>
+        <button type="button" data-v="side" aria-pressed="false">Сбоку</button>
+        <button type="button" data-v="back" aria-pressed="false">Сзади</button>
+      </div>
       <div class="upload">
-        <button class="btn" type="button" tabindex="-1">Загрузить видео</button>
-        <input type="file" id="fileInput" accept="video/*" aria-label="Загрузить видео">
+        <button class="btn" type="button" tabindex="-1">Загрузить видео (можно несколько)</button>
+        <input type="file" id="fileInput" accept="video/*" multiple aria-label="Загрузить видео">
       </div>
       <details>
         <summary>Как снять видео для точного разбора</summary>
@@ -181,6 +187,7 @@
           <li>10–40 секунд, 5–10 ударов одного типа. Для подачи — 3–6 подач.</li>
           <li>Хороший свет; 60 кадров/с, если телефон умеет.</li>
           <li>Видео обрабатывается прямо на телефоне и никуда не отправляется.</li>
+          <li>Много длинных записей? Нарежьте их программой <code>coach/tools/cut_strokes.py</code> (см. README): останутся только удары. Ролики с «_strokes_» в имени приложение разбирает сразу по ударам, можно выбрать несколько файлов.</li>
         </ul>
       </details>
     </div>

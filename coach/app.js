@@ -11,6 +11,7 @@
     "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task";
   const FPS = 15;          // кадров в секунду для разбора: хватает, чтобы поймать удар
   const MAX_SECONDS = 45;  // длиннее разбирать долго, а пользы мало
+  const MAX_SECONDS_CUT = 100; // ролик из нарезки — сплошные удары, его разбираем целиком (30 ударов ≈ 66 с)
 
   const $ = (id) => document.getElementById(id);
   const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
@@ -26,7 +27,7 @@
   };
   let sessions = store.get("sessions", []);
   const prefs = Object.assign(
-    { mode: "ground", hand: "right", name: "Вика", level: "1.5–2.5", backhand: "two", goal: "", autoAI: false },
+    { mode: "ground", view: "auto", hand: "right", name: "Вика", level: "1.5–2.5", backhand: "two", goal: "", autoAI: false },
     store.get("prefs", {}));
   const AI = window.TennisAI;
 
@@ -44,6 +45,8 @@
     sync();
   }
   bindSeg("modeSeg", "mode");
+  bindSeg("viewSeg", "view");
+  const viewOpt = () => (prefs.view === "auto" ? undefined : prefs.view);
   bindSeg("handSeg", "hand");
 
   // ---------- Профиль ----------
@@ -120,10 +123,9 @@
 
   // Safari на iPhone не грузит кадры, пока видео не запущено: ждём метаданные и коротко
   // запускаем-останавливаем ролик, чтобы декодер отдал первый кадр.
-  async function openVideo(video, file) {
-    if (video.src) URL.revokeObjectURL(video.src);
+  async function openVideo(video, url) {
     video.muted = true;
-    video.src = URL.createObjectURL(file);
+    if (video.src !== url) video.src = url;
     await withTimeout(new Promise((ok, fail) => {
       video.onloadedmetadata = ok;
       video.onerror = () => fail(new Error("video"));
@@ -219,9 +221,9 @@
     return frames;
   }
 
-  async function extractFrames(video, onProgress) {
+  async function extractFrames(video, onProgress, maxSeconds = MAX_SECONDS) {
     const lm = await getLandmarker();
-    const end = Math.min(video.duration, MAX_SECONDS);
+    const end = Math.min(video.duration, maxSeconds);
     if ("requestVideoFrameCallback" in HTMLVideoElement.prototype) {
       try {
         const frames = await extractByPlayback(video, lm, end, onProgress);
@@ -232,13 +234,16 @@
   }
 
   // ---------- Разбор ----------
-  let current = null; // { frames, result, session }
+  // current: { parts: [{ name, url, frames }], shown, result, session, shots }
+  // Один разбор может состоять из нескольких видео: удары из всех файлов сводятся вместе.
+  let current = null;
   let lastFrames = null;
+  let urls = [];
 
   $("fileInput").addEventListener("change", async (e) => {
-    const file = e.target.files[0];
+    const files = [...e.target.files];
     e.target.value = "";
-    if (file) await processFile(file);
+    if (files.length) await processFiles(files);
   });
 
   function setWork(title, text, frac) {
@@ -248,59 +253,111 @@
     $("workBar").style.width = Math.round((frac || 0) * 100) + "%";
   }
 
-  async function processFile(file) {
+  async function processFiles(files) {
     const video = $("video");
     $("result").hidden = true;
-    setWork("Разбираю видео…", "Загружаю модель распознавания позы", 0.02);
-    try {
-      await openVideo(video, file);
-      setWork("Разбираю видео…", "Загружаю модель распознавания позы (≈10 МБ, только в первый раз)", 0.03);
-      try { await withTimeout(getLandmarker(), 90000, "model"); } catch (e) { throw new Error("model"); }
-      const t0 = Date.now();
-      const frames = await extractFrames(video, (f) => setWork("Разбираю видео…",
-        `Распознаю движения: ${Math.round(f * 100)}% · ${Math.round((Date.now() - t0) / 1000)} с`, 0.05 + f * 0.9));
-      await showAnalysis(frames);
-    } catch (err) {
-      console.error(err);
-      const msg = err && err.message === "video" ? "Не получилось открыть это видео в браузере. Попробуйте другой ролик или снимите заново в обычном режиме (не замедленная съёмка)."
-        : err && err.message === "model" ? "Не удалось загрузить модель распознавания. Нужен интернет при первом запуске."
-        : "Что-то пошло не так при разборе. Попробуйте ещё раз или другое видео.";
-      setWork("Ошибка", msg, 0);
-      $("workTitle").classList.add("error");
+    $("workTitle").classList.remove("error");
+    urls.forEach((u) => URL.revokeObjectURL(u));
+    urls = files.map((f) => URL.createObjectURL(f));
+    const n = files.length;
+    const title = (i) => n > 1 ? `Разбираю видео ${i + 1} из ${n}…` : "Разбираю видео…";
+    const parts = [], skipped = [];
+    let lastError = null;
+    setWork(title(0), "Загружаю модель распознавания позы (≈10 МБ, только в первый раз)", 0.02);
+    try { await withTimeout(getLandmarker(), 90000, "model"); } catch (e) { return fail(new Error("model")); }
+
+    for (let i = 0; i < n; i++) {
+      try {
+        await openVideo(video, urls[i]);
+        const hits = A.gridHits(files[i].name, video.duration);
+        const t0 = Date.now();
+        const frames = await extractFrames(video, (f) => setWork(title(i),
+          `${hits ? `Нарезка: ${hits.length} ударов. ` : ""}Распознаю движения: ${Math.round(f * 100)}% · ${Math.round((Date.now() - t0) / 1000)} с`,
+          (i + 0.05 + f * 0.9) / n), hits ? MAX_SECONDS_CUT : MAX_SECONDS);
+        const end = Math.min(video.duration, hits ? MAX_SECONDS_CUT : MAX_SECONDS);
+        const r = A.analyze(frames, { mode: prefs.mode, hand: prefs.hand, view: viewOpt(), hitTimes: hits ? hits.filter((t) => t < end) : null });
+        if (r.error) { lastError = r.error; skipped.push(files[i].name); continue; }
+        const thumb = parts.length ? null : await thumbnail(r.strokes[0].t);
+        parts.push({ name: files[i].name, url: urls[i], frames, strokes: r.strokes, view: r.view, thumb });
+      } catch (err) {
+        console.error(err);
+        lastError = err;
+        skipped.push(files[i].name);
+      }
     }
+    if (!parts.length) return lastError instanceof Error ? fail(lastError) : noStrokes(lastError);
+    return showParts(parts, skipped);
   }
 
-  // Отдельная точка входа: разбор готовых кадров (используется и в тестах).
-  async function showAnalysis(frames) {
-    lastFrames = frames;
-    $("workTitle").classList.remove("error");
-    const result = A.analyze(frames, { mode: prefs.mode, hand: prefs.hand });
-    if (result.error) {
-      const text = result.error === "nopose"
-        ? "Не вижу игрока. Снимите так, чтобы игрок был виден целиком, с головы до ног, и ближе к камере."
-        : "Не нашёл ни одного удара. Проверьте, что выбран правильный тип (удары с отскока или подача) и на видео есть полные замахи.";
-      setWork("Не получилось разобрать", text, 0);
-      return null;
-    }
+  function fail(err) {
+    const msg = err && err.message === "video" ? "Не получилось открыть это видео в браузере. Попробуйте другой ролик или снимите заново в обычном режиме (не замедленная съёмка)."
+      : err && err.message === "model" ? "Не удалось загрузить модель распознавания. Нужен интернет при первом запуске."
+      : "Что-то пошло не так при разборе. Попробуйте ещё раз или другое видео.";
+    setWork("Ошибка", msg, 0);
+    $("workTitle").classList.add("error");
+    return null;
+  }
+
+  function noStrokes(code) {
+    const text = code === "nopose"
+      ? "Не вижу игрока. Снимите так, чтобы игрок был виден целиком, с головы до ног, и ближе к камере."
+      : "Не нашёл ни одного удара. Проверьте, что выбран правильный тип (удары с отскока или подача) и на видео есть полные замахи.";
+    setWork("Не получилось разобрать", text, 0);
+    return null;
+  }
+
+  // Отдельная точка входа: разбор готовых кадров уже открытого видео (используется в тестах).
+  async function showAnalysis(frames, name = "") {
+    const r = A.analyze(frames, { mode: prefs.mode, hand: prefs.hand, view: viewOpt(), hitTimes: A.gridHits(name, $("video").duration || 0) });
+    if (r.error) { lastFrames = frames; return noStrokes(r.error); }
+    const thumb = await thumbnail(r.strokes[0].t);
+    return showParts([{ name, url: $("video").src, frames, strokes: r.strokes, view: r.view, thumb }], []);
+  }
+
+  async function showParts(parts, skipped) {
+    lastFrames = parts[parts.length - 1].frames;
+    // Нумеруем удары подряд по всем видео и запоминаем, из какого файла каждый.
+    const strokes = [];
+    parts.forEach((p, f) => p.strokes.forEach((st) => strokes.push({ ...st, file: f, n: strokes.length + 1 })));
+    const view = parts.every((p) => p.view === "side") ? "side" : "back";
+    const result = A.summarize(strokes, view);
     $("workCard").hidden = true;
     const session = {
       id: Date.now().toString(36),
       date: new Date().toISOString(),
       mode: prefs.mode,
       hand: prefs.hand,
+      files: parts.length,
       overall: result.overall,
       view: result.view,
       reliable: result.reliable,
       level: result.reliable ? result.level.name : "",
       types: result.types,
-      thumb: await thumbnail(result.strokes[0].t),
+      thumb: parts[0].thumb,
     };
     sessions.push(session);
     saveSessions();
-    current = { frames, result, session, shots: null };
+    current = { parts, shown: parts.length - 1, result, session, shots: null, skipped };
     renderResult();
     if (prefs.autoAI && apiKey()) runAI();
     return result;
+  }
+
+  // Показать в плеере нужный файл разбора.
+  async function showPart(i) {
+    if (!current || current.shown === i) return;
+    await openVideo($("video"), current.parts[i].url);
+    current.shown = i;
+  }
+
+  async function seekStroke(n) {
+    const st = current && current.result.strokes.find((x) => x.n === n);
+    if (!st) return;
+    await showPart(st.file);
+    const v = $("video");
+    v.pause();
+    v.currentTime = Math.max(0, st.t - 0.05);
+    v.scrollIntoView({ behavior: "smooth", block: "center" });
   }
 
   function thumbnail(t) {
@@ -330,8 +387,8 @@
     const { result } = current;
     $("result").hidden = false;
 
-    $("chips").innerHTML = result.strokes.map((s, i) =>
-      `<button class="chip" data-t="${s.t}"><i class="dot" style="background:${colorFor(s.score)}"></i>${i + 1}. ${K.STROKES[s.type].short} · ${s.score}</button>`
+    $("chips").innerHTML = result.strokes.map((s) =>
+      `<button class="chip" data-n="${s.n}"><i class="dot" style="background:${colorFor(s.score)}"></i>${s.n}. ${K.STROKES[s.type].short} · ${s.score}</button>`
     ).join("");
 
     const lv = result.level;
@@ -427,9 +484,20 @@
     const busy = (text) => { card.innerHTML = `<h2>Глубокий разбор ИИ</h2><div class="progress"><i style="width:${text[1]}%"></i></div><p class="dim">${esc(text[0])}</p>`; };
     try {
       busy(["Вырезаю ключевые кадры ударов…", 5]);
-      const video = $("video");
-      const shots = await AI.captureKeyFrames(video, current.frames, current.result.strokes, (f) => busy(["Вырезаю ключевые кадры ударов…", 5 + f * 25]));
-      current.shots = shots;
+      if (!current.shots) {
+        // Удары для тренера выбираем равномерно по всем видео, затем по очереди открываем файлы.
+        const chosen = AI.pickStrokes(current.result.strokes);
+        const shots = [];
+        for (let f = 0; f < current.parts.length; f++) {
+          const mine = chosen.filter((st) => st.file === f);
+          if (!mine.length) continue;
+          await showPart(f);
+          shots.push(...await AI.captureKeyFrames($("video"), current.parts[f].frames, mine,
+            (x) => busy(["Вырезаю ключевые кадры ударов…", 5 + ((f + x) / current.parts.length) * 25])));
+        }
+        current.shots = shots;
+      }
+      const shots = current.shots;
       busy(["Тренер смотрит удары. Это займёт 1–2 минуты…", 40]);
       const ai = await AI.analyze({ apiKey: apiKey(), shots, session: current.session, profile: prefs, K });
       current.session.ai = ai;
@@ -476,7 +544,7 @@
           <p style="font-size:14px">${esc(s.verdict)}</p>
           ${s.good.length ? `<ul class="list-good" style="font-size:14px">${s.good.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>` : ""}
           ${s.fix.length ? `<ul class="list-fix" style="font-size:14px">${s.fix.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>` : ""}
-          ${shot ? `<button class="btn ghost" style="margin-top:6px" data-seek="${shot.t}">Показать на видео</button>` : ""}</div>`;
+          ${shot ? `<button class="btn ghost" style="margin-top:6px" data-seek="${shot.n}">Показать на видео</button>` : ""}</div>`;
       }).join("")}
       ${ai.next_video_tip ? `<h3>Для следующего видео</h3><p class="dim" style="font-size:14px">${esc(ai.next_video_tip)}</p>` : ""}`;
   }
@@ -496,12 +564,7 @@
     if (e.target.closest("[data-ai=run]")) runAI();
     if (e.target.closest("[data-goto]")) showTab(e.target.closest("[data-goto]").dataset.goto);
     const sk = e.target.closest("[data-seek]");
-    if (sk) {
-      const v = $("video");
-      v.pause();
-      v.currentTime = Math.max(0, parseFloat(sk.dataset.seek) - 0.05);
-      v.scrollIntoView({ behavior: "smooth", block: "center" });
-    }
+    if (sk) seekStroke(parseInt(sk.dataset.seek, 10));
   });
 
   // ---------- Плеер со скелетом ----------
@@ -518,7 +581,7 @@
     const s = Math.min(rect.width / video.videoWidth, rect.height / video.videoHeight) * dpr;
     const ox = (cv.width - video.videoWidth * s) / 2, oy = (cv.height - video.videoHeight * s) / 2;
     let f = null;
-    for (const fr of current.frames) if (!f || Math.abs(fr.t - video.currentTime) < Math.abs(f.t - video.currentTime)) f = fr;
+    for (const fr of current.parts[current.shown].frames) if (!f || Math.abs(fr.t - video.currentTime) < Math.abs(f.t - video.currentTime)) f = fr;
     if (!f || !f.p || Math.abs(f.t - video.currentTime) > 0.2) return;
     const P = (i) => [ox + f.p[i][0] * s, oy + f.p[i][1] * s];
     ctx.lineWidth = 3 * dpr; ctx.strokeStyle = "rgba(255, 211, 77, 0.9)"; ctx.lineCap = "round";
@@ -536,11 +599,7 @@
 
   $("chips").addEventListener("click", (e) => {
     const b = e.target.closest(".chip");
-    if (!b) return;
-    const v = $("video");
-    v.pause();
-    v.currentTime = Math.max(0, parseFloat(b.dataset.t) - 0.05);
-    v.scrollIntoView({ behavior: "smooth", block: "center" });
+    if (b) seekStroke(parseInt(b.dataset.n, 10));
   });
 
   // ---------- Прогресс ----------
@@ -716,5 +775,5 @@
   });
 
   // Для автоматических проверок.
-  window.CoachApp = { showAnalysis, showTab, prefs, runAI, current: () => current, lastFrames: () => lastFrames };
+  window.CoachApp = { showAnalysis, processFiles, showTab, prefs, runAI, current: () => current, lastFrames: () => lastFrames };
 })();

@@ -91,12 +91,13 @@
   }
 
   // Удары для разбора: равномерно по видео, не больше MAX_STROKES.
+  // Номер удара берём готовый (s.n), если он задан: так номера совпадают с кнопками ударов.
   function pickStrokes(strokes) {
-    if (strokes.length <= MAX_STROKES) return strokes.map((s, i) => ({ ...s, n: i + 1 }));
+    if (strokes.length <= MAX_STROKES) return strokes.map((s, i) => ({ ...s, n: s.n || i + 1 }));
     const out = [];
     for (let k = 0; k < MAX_STROKES; k++) {
       const i = Math.round((k * (strokes.length - 1)) / (MAX_STROKES - 1));
-      out.push({ ...strokes[i], n: i + 1 });
+      out.push({ ...strokes[i], n: strokes[i].n || i + 1 });
     }
     return out;
   }
@@ -181,5 +182,5 @@
     return "Не получилось сделать глубокий разбор.";
   }
 
-  root.TennisAI = { captureKeyFrames, analyze, describeError, TYPE_NAMES, MODEL };
+  root.TennisAI = { captureKeyFrames, pickStrokes, analyze, describeError, TYPE_NAMES, MODEL };
 })(window);

@@ -73,3 +73,20 @@ test("съёмка сзади: точка удара не оценивается
   assert.equal(r.reliable, false);
   assert.ok(!r.types.forehand.metrics.contactFront);
 });
+
+test("ролик из нарезки: моменты ударов берутся из имени файла", () => {
+  assert.deepEqual(A.gridHits("vika_part2_strokes_s2.2_h1.3.mp4", 6.62), [1.3, 3.5, 5.7]);
+  assert.equal(A.gridHits("IMG_1234.MOV", 30), null);
+  // С готовыми моментами удары не ищутся заново: их ровно столько, сколько в нарезке.
+  const r = A.analyze(forehandClip(true), { mode: "ground", hand: "right", hitTimes: [1.5, 3.5] });
+  assert.equal(r.strokes.length, 2);
+  assert.deepEqual(r.strokes.map((s) => s.t), [1.5, 3.5]);
+});
+
+test("сводка по нескольким видео объединяет удары", () => {
+  const a = A.analyze(forehandClip(true), { mode: "ground", hand: "right" });
+  const b = A.analyze(forehandClip(false), { mode: "ground", hand: "right" });
+  const all = A.summarize([...a.strokes, ...b.strokes], "side");
+  assert.equal(all.types.forehand.count, a.strokes.length + b.strokes.length);
+  assert.ok(all.overall < a.overall && all.overall > b.overall);
+});
